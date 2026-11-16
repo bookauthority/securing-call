@@ -1,0 +1,504 @@
+{
+  "experiment_id": "exp-14-stress-redteam-adversarial-eval-v1",
+  "hypothesis": "A structured adversarial evaluation program that (a) uses realistic cloned-voice attack workloads and (b) is automated via the baseline detection pipeline (Chapter 5) will reveal materially different and more actionable resilience characteristics of the voice cloning defenses than evaluation on generic benchmark data alone, enabling targeted hardening decisions for enterprise customer service environments.",
+  "baseline": {
+    "description": "Evaluation of the synthetic voice detection and verification stack only on generic, non-adversarial test data (e.g., public benchmarks and randomly sampled internal calls) without purpose-built adversarial attack generation, scenario modeling, or automated stress-test harnesses.",
+    "setup": [
+      "Use the baseline synthetic voice detection pipeline from Chapter 5 (`/pipelines/baseline_detector/`).",
+      "Use the best-performing configuration selected in earlier chapters (e.g., Chapter 6) but do not introduce adversarial perturbations, cloning-specific attacks, or targeted evasion attempts.",
+      "Evaluate on a held-out mix of natural vs. off-the-shelf synthetic speech from public datasets and any available internal evaluation sets.",
+      "Compute standard metrics (EER, ROC AUC, precision/recall at 2\u20133 fixed thresholds) and derive a single recommended operating threshold for production.",
+      "No explicit red team process, rules of engagement, or scenario-based reporting\u2014results are reported as aggregate model metrics only."
+    ]
+  },
+  "treatment": {
+    "description": "Augment the evaluation of the same detection and verification stack with a structured, automated adversarial evaluation harness that generates cloned voices and attack variants aligned to realistic enterprise threat scenarios, then measures system behavior and resilience under stress.",
+    "components": [
+      {
+        "name": "Adversarial Scenario Library",
+        "description": "A machine-readable catalog of enterprise-relevant attack scenarios (e.g., executive impersonation, high-value customer account takeover, agent impersonation) specifying assets, channels, and attacker goals.",
+        "artifact_path": "scenarios/redteam_scenarios.yaml"
+      },
+      {
+        "name": "Synthetic Voice Attack Generator",
+        "description": "A modular tool that wraps configurable TTS/voice cloning models to produce cloned voices and adversarial variants (e.g., different SNR levels, channel effects, prompt variants).",
+        "artifact_path": "tools/attack_generation/",
+        "notes": "Must be configured with strict internal-only use and safeguards per governance requirements; no generation of real customer voices unless explicitly authorized and ethically cleared."
+      },
+      {
+        "name": "Adversarial Test Harness",
+        "description": "An automated runner that (a) instantiates scenarios from the library, (b) generates corresponding audio workloads via the attack generator and available real speech, (c) passes them through the baseline detection and any verification/liveness services via defined APIs, and (d) logs detailed outcomes and metrics.",
+        "artifact_path": "harness/adversarial_eval_runner.py"
+      },
+      {
+        "name": "Stress-Resilience Reporting",
+        "description": "Reporting scripts and templates that summarize behavior under stress at the scenario level (e.g., by channel, attacker capability, and target asset), designed to inform control tuning and product/policy changes.",
+        "artifact_path": "reports/adversarial_resilience_report.ipynb"
+      }
+    ],
+    "evaluation": [
+      "Use the same detection and verification configurations and thresholds as in the baseline condition.",
+      "Run all defined adversarial scenarios and workloads through the harness.",
+      "Compute not only aggregate metrics, but also scenario- and segment-level resilience metrics (e.g., per-attack-type false negative rates, per-channel ROC, degradation under noise/channel shifts).",
+      "Compare treatment vs. baseline results on comparable inputs to assess where generic evaluation has over- or under-estimated real-world resilience."
+    ]
+  },
+  "workloads": [
+    {
+      "id": "wl-01-executive-impersonation-outbound",
+      "description": "Simulated attacker calls to internal finance or support lines, using cloned audio of one or more executives attempting to authorize urgent outbound payments or data access.",
+      "channel": "PSTN/VoIP, outbound-to-internal",
+      "inputs": {
+        "speaker_profiles": "5\u201310 minutes of recorded natural speech from a small set of internal test actors role-playing executives (never real executives without explicit informed consent and legal approval).",
+        "scripts": "Script templates reflecting typical approval or escalation requests (e.g., high-value wire, vendor onboarding exception, data export).",
+        "cloning_models": [
+          "Model A: High-fidelity commercial TTS (where licensed and permitted).",
+          "Model B: Open-source cloning model (e.g., VITS/Grad-TTS based) fine-tuned on the actor voices for internal research."
+        ],
+        "variants": [
+          "Clean audio, no added noise.",
+          "Added office background noise at 20 dB, 10 dB SNR.",
+          "Transcoded through telephony codec (e.g., G.711, Opus) to simulate real network conditions.",
+          "Different speaking styles (urgent, calm, slightly distorted) produced by prompt variations or style controls."
+        ]
+      },
+      "size_targets": {
+        "num_unique_speakers": 5,
+        "num_scenarios": 3,
+        "num_utterances_per_scenario": 100
+      }
+    },
+    {
+      "id": "wl-02-high-value-customer-impersonation-inbound",
+      "description": "Simulated inbound calls where the attacker uses a cloned version of a high-value customer's voice to pass biometric voice verification and request sensitive actions.",
+      "channel": "Inbound to contact center / IVR / agent",
+      "inputs": {
+        "speaker_profiles": "Synthetic 'customer' personas based on internal test speakers; no real customer audio used without explicit, documented consent and legal review.",
+        "scripts": "Authentication flows for high-risk actions (e.g., change MFA phone number, request password reset, add payee).",
+        "cloning_models": [
+          "Same as wl-01 where permitted, to test cross-scenario generalization."
+        ],
+        "attack_modes": [
+          "Static phrase replay (simple replay of recorded enrollment phrases).",
+          "Dynamic cloned speech: attacker answers knowledge-based questions with cloned voice.",
+          "Hybrid: mix of cloned voice and natural voice from a cooperating tester to emulate real-time coordination."
+        ]
+      },
+      "size_targets": {
+        "num_unique_speakers": 10,
+        "num_enrollment_samples_per_speaker": 5,
+        "num_attack_calls": 200
+      }
+    },
+    {
+      "id": "wl-03-agent-impersonation-social-engineering",
+      "description": "Simulated calls to customers using cloned 'agent' voices in outbound scams, testing detection of synthetic voices on the outbound/monitoring side and the ability of internal quality or anti-abuse tools to flag anomalies.",
+      "channel": "Outbound-to-customer-style audio, monitored internally",
+      "inputs": {
+        "speaker_profiles": "Voices of internal test agents or voice actors, with consent and data protection controls.",
+        "scripts": "Common scam pretexts (e.g., 'verification of suspicious transaction', 'upgrade of service plan', 'refund processing').",
+        "cloning_models": [
+          "Same as wl-01 and wl-02 for consistency."
+        ],
+        "environmental_factors": [
+          "Different telephony codecs.",
+          "Simulated packet loss/jitter.",
+          "Different language/locale variants if supported (e.g., EN-US, EN-UK)."
+        ]
+      },
+      "size_targets": {
+        "num_unique_speakers": 5,
+        "num_scenarios": 3,
+        "num_attack_calls": 150
+      }
+    },
+    {
+      "id": "wl-04-benign-natural-control-calls",
+      "description": "Matched set of natural human calls (no synthetic content) that mirror the scripts and channels of the adversarial workloads, used to estimate impact on false positive/legitimate user experience.",
+      "channel": "Mixed inbound/outbound, same codecs and routing as adversarial workloads",
+      "inputs": {
+        "speakers": "Same pool of test speakers as above, speaking in their natural voices.",
+        "scripts": "Legitimate variants of the same scenario texts used for attacks.",
+        "recording_chain": "Use same telephony stack where possible; otherwise apply equivalent codecs and background noise."
+      },
+      "size_targets": {
+        "num_unique_speakers": 15,
+        "num_calls": 400
+      }
+    }
+  ],
+  "controls": {
+    "data_separation": [
+      "Ensure no overlap between training data for detection/verification models and the synthetic or natural test audio used in this experiment.",
+      "Use distinct speakers for evaluation vs. any prior training/fine-tuning of models where feasible."
+    ],
+    "threshold_freezing": [
+      "Freeze all detection and verification thresholds to values selected during non-adversarial validation before running adversarial workloads.",
+      "Do not adjust thresholds mid-run; any tuning based on adversarial outcomes must be done in subsequent, clearly versioned experiment iterations."
+    ],
+    "environmental_consistency": [
+      "Run baseline and treatment evaluations in the same infrastructure environment (same hardware type, model versions, and configuration).",
+      "Pin model versions, dependency versions, and configuration files via explicit hashes or tags in the repository."
+    ],
+    "ethical_governance": [
+      "Obtain documented approvals from legal, compliance, security, and data protection leads before generating any cloned voices, even from internal actors.",
+      "Prohibit use of this harness and tools against production customers, agents, or executives without a formally approved red teaming engagement with clear scope and guardrails.",
+      "Log all experiment runs with purpose, scope, and approvers in an auditable register (e.g., `governance/redteam_run_log.jsonl`)."
+    ],
+    "randomization_and_reproducibility": [
+      "Use controlled random seeds for workload generation (e.g., text variant choice, noise injection) and record them in metadata for each generated sample.",
+      "Shuffle evaluation sample order when feeding to detection APIs to avoid order effects."
+    ]
+  },
+  "metrics": [
+    {
+      "name": "false_negative_rate_overall",
+      "unit": "proportion_of_adversarial_samples_classified_as_benign"
+    },
+    {
+      "name": "false_positive_rate_overall",
+      "unit": "proportion_of_benign_samples_flagged_as_synthetic_or_suspicious"
+    },
+    {
+      "name": "fnr_by_workload",
+      "unit": "proportion_per_workload_id"
+    },
+    {
+      "name": "fpr_by_workload",
+      "unit": "proportion_per_workload_id"
+    },
+    {
+      "name": "eer",
+      "unit": "proportion_at_equal_error_rate"
+    },
+    {
+      "name": "roc_auc",
+      "unit": "unitless_area_under_curve_0_to_1"
+    },
+    {
+      "name": "detection_latency_p50",
+      "unit": "milliseconds"
+    },
+    {
+      "name": "detection_latency_p95",
+      "unit": "milliseconds"
+    },
+    {
+      "name": "verification_success_rate_legit",
+      "unit": "proportion_of_legitimate_users_passing_verification"
+    },
+    {
+      "name": "verification_bypass_rate_adversarial",
+      "unit": "proportion_of_adversarial_attempts_successfully_passing_verification"
+    },
+    {
+      "name": "scenario_resilience_score",
+      "unit": "0_to_100_composite_index_per_scenario",
+      "notes": "Can be computed as 100 * (1 - fnr_scenario) adjusted by acceptable fpr_scenario bands."
+    },
+    {
+      "name": "coverage_of_scenarios",
+      "unit": "proportion_of_defined_scenarios_exercised_in_run"
+    },
+    {
+      "name": "anomaly_flag_rate_in_monitoring",
+      "unit": "proportion_of_calls_triggering_any_security_flag_in_monitoring_stack"
+    }
+  ],
+  "success_criteria": {
+    "minimum_technical_resilience": [
+      "Overall false_negative_rate_overall on combined adversarial workloads (wl-01 to wl-03) is at or below 0.25 at the pre-selected operating threshold.",
+      "verification_bypass_rate_adversarial is at or below 0.20 for wl-02 attacks targeting voice verification.",
+      "detection_latency_p95 remains within the maximum budget defined for real-time decisioning in Chapter 8 (e.g., <= 750 ms end-to-end for streaming segments), when evaluated with telephony-like workloads."
+    ],
+    "stability_vs_generic_evaluation": [
+      "No scenario (workload-specific) FNR is worse than 2x the FNR observed on generic benchmark data for that same model configuration.",
+      "roc_auc degradation between generic evaluation and adversarial evaluation is less than 0.05 absolute where domain alignment is high (same language, similar codecs)."
+    ],
+    "programmatic_outcomes": [
+      "Adversarial evaluation harness can run unattended end-to-end and produce reproducible results (variation < 0.02 absolute in FNR/FPR when re-running with same seeds and workloads).",
+      "Experiment results are consumable by stakeholders via the reporting notebook/template and feed at least 3 concrete recommendations into product, detection configuration, or training updates within the organization."
+    ]
+  },
+  "failure_modes": [
+    {
+      "name": "silent_high_false_negatives",
+      "description": "Detection and verification components exhibit high false negative rates (e.g., >0.40) for certain adversarial workloads, but this is not apparent from generic evaluation; the system appears strong on paper but fails on realistic attacks."
+    },
+    {
+      "name": "overly_aggressive_thresholds",
+      "description": "Thresholds tuned on adversarial workloads cause unacceptable false positive rates (>0.05) on benign calls (wl-04), damaging customer experience and agent workflows."
+    },
+    {
+      "name": "inadequate_scenario_coverage",
+      "description": "Scenario library does not reflect key enterprise risks (e.g., specific high-value business processes, languages, or regulatory constraints), resulting in a misleading sense of security."
+    },
+    {
+      "name": "tool_misuse_or_scope_creep",
+      "description": "Adversarial generation tools are used outside approved scopes or without sufficient governance (e.g., targeting production agents/customers, generating unauthorized clones of real individuals)."
+    },
+    {
+      "name": "data_leakage_and_confounds",
+      "description": "Overlap between training data and evaluation workloads, or unintentional differences in codecs/noise between baseline and treatment runs, distort metric comparisons and mask real weaknesses."
+    },
+    {
+      "name": "non_reproducible_results",
+      "description": "Variability in workloads or environment (e.g., unpinned models, non-deterministic generation) causes large swings in metrics across runs, preventing reliable interpretation of resilience."
+    }
+  ],
+  "required_environment": {
+    "software": [
+      "Python 3.10+",
+      "Core ML stack used in earlier chapters (e.g., PyTorch or TensorFlow, consistent with Chapter 5 implementation).",
+      "Audio processing libraries (e.g., librosa, torchaudio, ffmpeg bindings).",
+      "HTTP client libraries for calling detection/verification APIs if they are exposed as services (e.g., `requests` or `httpx`).",
+      "YAML/JSON handling libraries (e.g., `pyyaml`) for scenario configuration.",
+      "JupyterLab or equivalent for running reporting notebooks.",
+      "Container runtime (e.g., Docker) if detection/verification services are deployed in containers."
+    ],
+    "hardware": [
+      "CPU-only environment is sufficient for running detection/verification inference pipelines at evaluation scale, but at least one GPU (e.g., NVIDIA T4 or equivalent) is recommended for faster synthetic audio generation with NN-based TTS/cloning models.",
+      "Sufficient disk storage for generated audio (recommendation: >= 200 GB for the workloads described, including intermediate artifacts and logs)."
+    ],
+    "network_and_access": [
+      "Access to the detection and verification endpoints from Chapters 5\u20138 (either as local code modules or network services) in a non-production environment.",
+      "No direct connectivity to live production telephony systems is required; test audio can be routed through staging or offline processing chains as needed.",
+      "Firewall rules permitting outbound access to any external TTS/voice cloning APIs used for internal testing, subject to legal and procurement approvals."
+    ],
+    "governance_and_approvals": [
+      "Approved red teaming or internal offensive security charter that explicitly covers synthetic voice testing in non-production environments.",
+      "Documented sign-off from legal, privacy, and information security specifying allowed data sources, cloning targets (only consenting internal actors or synthetic personas), and retention policies.",
+      "Designated owner (e.g., voice security lead or ML lead) responsible for the experiment and for triaging any findings before broader dissemination."
+    ]
+  },
+  "run_instructions": [
+    "1. Governance and Scoping",
+    "1.1. Draft and approve a short red teaming scope document covering: objectives, systems under test (SUTs), data sources, allowed cloning targets, timing, and stakeholders.",
+    "1.2. Record approvals (legal, privacy, CISO or delegate) in `governance/redteam_scope_<date>.md` and set an experiment identifier matching `experiment_id`.",
+    "1.3. Ensure no production customer or executive audio is included unless explicitly authorized; default to internal test voices or synthetic personas.",
+    "",
+    "2. Environment Preparation",
+    "2.1. Clone the companion repository (or relevant fork) into a secure, access-controlled environment: `git clone https://github.com/bookauthority/securing-call`.",
+    "2.2. Checkout the branch or tag that matches the book's code release (e.g., `git checkout v1.0-adversarial-eval`).",
+    "2.3. Create and activate a dedicated virtual environment: `python -m venv .venv && source .venv/bin/activate`.",
+    "2.4. Install dependencies: `pip install -r requirements.txt` and any additional `requirements-adversarial.txt` if present.",
+    "2.5. Bring up the baseline detection and verification services (if containerized) via `docker compose up detector verification` or follow Chapter 5\u20138 instructions for running them locally.",
+    "2.6. Verify health of the SUTs using smoke tests: run `python scripts/healthcheck_detectors.py` and confirm all checks pass.",
+    "",
+    "3. Scenario Definition",
+    "3.1. Open `scenarios/redteam_scenarios.yaml` and review existing example scenarios aligned to workloads wl-01 to wl-03.",
+    "3.2. Adapt scenario definitions to your environment, specifying:",
+    "     - Target systems (e.g., which detector/verification endpoints).",
+    "     - Channels/codecs to simulate.",
+    "     - Business flows (e.g., 'wire_approval', 'high_value_auth').",
+    "     - Constraints and any disallowed attack modes for this run.",
+    "3.3. Validate scenario file syntax using: `python tools/validate_scenarios.py scenarios/redteam_scenarios.yaml`.",
+    "",
+    "4. Audio Asset Preparation",
+    "4.1. Collect or record internal test voices for speakers designated as 'executives', 'customers', and 'agents', following privacy and consent protocols.",
+    "4.2. Store raw WAV files in a structured directory: `data/raw/internal_test_voices/<role>/<speaker_id>/`.",
+    "4.3. Run the feature extraction and cataloging script to create a manifest: `python tools/catalog_voices.py --input data/raw/internal_test_voices --output data/manifests/voice_catalog.json`.",
+    "",
+    "5. Attack Generator Configuration",
+    "5.1. Configure credentials and endpoints for any external or internal TTS/voice cloning services in `config/attack_generation.yaml` (ensuring they are approved and licensed).",
+    "5.2. Specify which speakers and scripts can be cloned and under which roles (e.g., map test speakers to 'exec_x', 'customer_y').",
+    "5.3. Set global random seed and generation parameters (e.g., `seed`, `noise_levels`, `codec_profiles`) for reproducibility.",
+    "5.4. Optional: Run a dry-run generation for a small subset: `python tools/attack_generation/preview_generation.py --scenario-id wl-01 --num-samples 5` and manually inspect outputs for quality and safety.",
+    "",
+    "6. Workload Generation",
+    "6.1. Generate adversarial workloads per scenario:",
+    "     - `python tools/attack_generation/generate_workload.py --workload-id wl-01 --manifest data/manifests/voice_catalog.json --output data/generated/wl-01/`",
+    "     - Repeat for `wl-02` and `wl-03` with matching parameters to the size targets.",
+    "6.2. Generate matched benign workloads for wl-04 by recording or synthesizing natural calls (no cloning) and store under `data/generated/wl-04/`.",
+    "6.3. Run the codec and noise transformation pipeline to simulate telephony conditions:",
+    "     - `python tools/apply_channel_effects.py --input-root data/generated --config config/channel_profiles.yaml --output-root data/channelized/`.",
+    "6.4. Create a combined workload index (metadata JSON/CSV) describing each sample, its ground truth label (adversarial_type or benign), scenario, and environment parameters:",
+    "     - `python tools/index_workloads.py --input-root data/channelized --output data/manifests/workloads_index.jsonl`.",
+    "",
+    "7. Baseline Evaluation (Non-Adversarial)",
+    "7.1. For comparison, evaluate the SUTs on the existing non-adversarial test set from earlier chapters:",
+    "     - `python harness/eval_generic_dataset.py --config config/baseline_eval.yaml --output results/generic_eval.json`.",
+    "7.2. Freeze the selected operating thresholds in a config file: `config/frozen_thresholds.yaml`.",
+    "",
+    "8. Adversarial Evaluation Run",
+    "8.1. Configure the adversarial evaluation harness by editing `config/adversarial_eval.yaml` to point to:",
+    "     - Detection and verification endpoints.",
+    "     - `data/manifests/workloads_index.jsonl`.",
+    "     - `config/frozen_thresholds.yaml`.",
+    "8.2. Run a small smoke test over a handful of samples:",
+    "     - `python harness/adversarial_eval_runner.py --config config/adversarial_eval.yaml --limit 20 --output results/adversarial_eval_smoke.jsonl`.",
+    "     - Confirm responses are logged with expected fields and latency is within acceptable bounds.",
+    "8.3. Execute the full adversarial evaluation:",
+    "     - `python harness/adversarial_eval_runner.py --config config/adversarial_eval.yaml --output results/adversarial_eval_full.jsonl`.",
+    "8.4. Ensure that system load (CPU/GPU, memory) remains within safe envelopes; if not, throttle batch sizes or concurrency in the config and re-run.",
+    "",
+    "9. Metrics Computation and Reporting",
+    "9.1. Compute core metrics from the raw result logs:",
+    "     - `python analysis/compute_metrics.py --results results/adversarial_eval_full.jsonl --workloads data/manifests/workloads_index.jsonl --output results/adversarial_metrics.json`.",
+    "9.2. Generate scenario-level reports and visualizations:",
+    "     - Launch Jupyter: `jupyter lab`.",
+    "     - Open `reports/adversarial_resilience_report.ipynb` and run all cells, parameterizing with the paths to metrics and workload manifests.",
+    "9.3. Compare metrics to generic evaluation results (from step 7) within the notebook, focusing on:",
+    "     - FNR and FPR differences per workload/scenario.",
+    "     - Verification bypass rates for wl-02.",
+    "     - Latency distributions across workloads.",
+    "",
+    "10. Interpretation and Hardening Actions",
+    "10.1. Identify scenarios where resilience is below success criteria (e.g., FNR > 0.25, verification_bypass_rate > 0.20).",
+    "10.2. Log these as issues in your internal tracking system, linking to specific scenario IDs and sample examples.",
+    "10.3. Facilitate a cross-functional review (security, product, operations, legal) to decide on remediation actions such as:",
+    "     - Adjusting thresholds or implementing scenario-specific policies (e.g., mandatory secondary verification for exec or high-value flows).",
+    "     - Updating training data or retraining detection models with more representative adversarial samples (if permitted).",
+    "     - Initiating agent or fraud-operations training targeting discovered weaknesses.",
+    "",
+    "11. Documentation and Governance Closure",
+    "11.1. Summarize the experiment in a run report template (e.g., `reports/templates/redteam_run_template.md`) including scope, methodology, key findings, and recommended actions.",
+    "11.2. Store raw outputs, configuration files, and the final report in a versioned, access-controlled location (e.g., `adversarial_runs/<experiment_id>/`).",
+    "11.3. Update the red team/run register (e.g., `governance/redteam_run_log.jsonl`) with the run metadata, including start/end times, approvers, and links to evidence.",
+    "11.4. If material weaknesses are discovered, trigger the appropriate incident or risk management processes per Chapter 11 and Chapter 12 guidance."
+  ],
+  "evidence_schema": {
+    "run_metadata": {
+      "type": "object",
+      "required_fields": [
+        "experiment_id",
+        "run_id",
+        "datetime_started_utc",
+        "datetime_completed_utc",
+        "runner",
+        "sut_versions",
+        "config_hashes",
+        "scenario_file_hash",
+        "notes"
+      ],
+      "fields": {
+        "experiment_id": "string_matching_this_spec",
+        "run_id": "string_unique_identifier_for_this_run",
+        "datetime_started_utc": "ISO_8601_timestamp",
+        "datetime_completed_utc": "ISO_8601_timestamp",
+        "runner": "string_identifier_for_person_or_automation_account",
+        "sut_versions": {
+          "detector_model_version": "string",
+          "verification_model_version": "string",
+          "pipeline_commit_sha": "string"
+        },
+        "config_hashes": {
+          "adversarial_eval_config_sha256": "string",
+          "thresholds_config_sha256": "string"
+        },
+        "scenario_file_hash": "sha256_of_scenarios_redteam_scenarios_yaml",
+        "notes": "free_text_optional"
+      }
+    },
+    "workload_manifest_entry": {
+      "type": "object",
+      "required_fields": [
+        "sample_id",
+        "file_path",
+        "workload_id",
+        "scenario_id",
+        "role",
+        "ground_truth_label",
+        "speaker_id",
+        "generation_parameters",
+        "channel_profile",
+        "seed"
+      ],
+      "fields": {
+        "sample_id": "string_unique_identifier",
+        "file_path": "relative_path_to_audio_file",
+        "workload_id": "one_of_[wl-01, wl-02, wl-03, wl-04, ...]",
+        "scenario_id": "string_scenario_identifier_from_scenario_file",
+        "role": "e.g._attacker, customer, agent",
+        "ground_truth_label": "one_of_[adversarial, benign]",
+        "speaker_id": "string_pseudonymous_identifier",
+        "generation_parameters": {
+          "cloning_model_name": "string_or_null_for_natural",
+          "text_prompt_id": "string",
+          "noise_level_db": "float",
+          "style_or_emotion_tag": "string_or_null"
+        },
+        "channel_profile": {
+          "codec": "e.g._g711, opus",
+          "packet_loss_rate": "float",
+          "snr_db": "float"
+        },
+        "seed": "integer_random_seed_used_for_generation_if_applicable"
+      }
+    },
+    "sut_response_log_entry": {
+      "type": "object",
+      "required_fields": [
+        "sample_id",
+        "detector_score",
+        "detector_decision",
+        "verification_score",
+        "verification_decision",
+        "latency_ms",
+        "timestamp_utc"
+      ],
+      "fields": {
+        "sample_id": "string_linking_back_to_workload_manifest",
+        "detector_score": "float_between_0_and_1_where_higher_means_more_likely_synthetic",
+        "detector_decision": "one_of_[synthetic, human, unknown]_based_on_frozen_thresholds",
+        "verification_score": "float_between_0_and_1_where_higher_means_more_likely_target_speaker_or_null_if_not_applicable",
+        "verification_decision": "one_of_[pass, fail, not_applicable]",
+        "latency_ms": "float_round_trip_time_for_detection_and_verification",
+        "timestamp_utc": "ISO_8601_timestamp_when_request_completed"
+      }
+    },
+    "metrics_summary": {
+      "type": "object",
+      "required_fields": [
+        "experiment_id",
+        "run_id",
+        "overall_metrics",
+        "per_workload_metrics"
+      ],
+      "fields": {
+        "experiment_id": "string",
+        "run_id": "string",
+        "overall_metrics": {
+          "false_negative_rate_overall": "float",
+          "false_positive_rate_overall": "float",
+          "eer": "float",
+          "roc_auc": "float",
+          "detection_latency_p50": "float_ms",
+          "detection_latency_p95": "float_ms",
+          "verification_success_rate_legit": "float",
+          "verification_bypass_rate_adversarial": "float",
+          "coverage_of_scenarios": "float"
+        },
+        "per_workload_metrics": [
+          {
+            "workload_id": "string",
+            "num_samples": "integer",
+            "false_negative_rate": "float_for_that_workload",
+            "false_positive_rate": "float_for_that_workload",
+            "scenario_resilience_score": "float_0_to_100",
+            "verification_bypass_rate_adversarial": "float_or_null_if_not_applicable",
+            "detection_latency_p50": "float_ms",
+            "detection_latency_p95": "float_ms"
+          }
+        ]
+      }
+    },
+    "report_attachment": {
+      "type": "object",
+      "required_fields": [
+        "experiment_id",
+        "run_id",
+        "report_path",
+        "generated_at_utc",
+        "author"
+      ],
+      "fields": {
+        "experiment_id": "string",
+        "run_id": "string",
+        "report_path": "relative_path_to_markdown_or_notebook_export",
+        "generated_at_utc": "ISO_8601_timestamp",
+        "author": "string_identifier"
+      }
+    }
+  }
+}

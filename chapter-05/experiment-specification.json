@@ -1,0 +1,700 @@
+{
+  "experiment_id": "exp-ch5-baseline-synth-voice-det-v1",
+  "hypothesis": "A simple supervised classifier built on open acoustic embeddings can achieve a reproducible, non-trivial separation between synthetic and natural voices (e.g., EER significantly better than random guessing) on a held-out test set drawn from diverse open-source datasets, and can be packaged as a low-latency service suitable for proof-of-concept integration into enterprise contact center architectures.",
+  "baseline": {
+    "description": "A minimal but enterprise-relevant synthetic-vs-human voice detection pipeline using off-the-shelf audio embeddings and a simple classifier, implemented with open datasets and models. This serves as the reference configuration against which future enhancements (ensembles, domain adaptation, proprietary models) are compared.",
+    "data": {
+      "datasets": [
+        {
+          "name": "ASVspoof 2019 LA",
+          "role": "Primary source of labeled bona fide (human) and spoofed (synthetic/converted) speech for training and evaluation.",
+          "splits": {
+            "train": "Use only the official train split for model training.",
+            "dev": "Use the official dev split for validation, hyperparameter tuning, and early stopping.",
+            "eval": "Use the official eval split as the held-out test set for reporting primary metrics."
+          },
+          "notes": "Focus on logical access (LA) subset; treat all spoofed attack types as synthetic voice. Do not use ASV scores\u2014only the raw waveforms and spoof labels."
+        },
+        {
+          "name": "VCTK + publicly available synthetic variants (e.g., VCTK-based TTS samples from academic releases)",
+          "role": "Secondary dataset to test limited cross-dataset generalization and robustness to different speakers and recording conditions.",
+          "splits": {
+            "train": "Optional small augmentation (<= 20% of total training examples) if desired; ensure no speaker overlap with evaluation splits.",
+            "eval": "Use a held-out subset purely for out-of-domain evaluation; do not mix with ASVspoof for headline metrics."
+          },
+          "notes": "If used, document exact source URLs and license terms in the repo."
+        }
+      ],
+      "label_definition": {
+        "positive_class": "synthetic_voice",
+        "negative_class": "natural_voice",
+        "mapping": {
+          "ASVspoof2019_LA": {
+            "bonafide": "natural_voice",
+            "spoof": "synthetic_voice"
+          }
+        }
+      },
+      "data_preparation": {
+        "audio_format": "Convert all audio to mono, 16 kHz PCM WAV, 16-bit.",
+        "duration_handling": "For each file, extract a single centered segment of fixed length (e.g., 3.0 seconds). If shorter, pad with low-level noise or zero-padding; if longer, center-crop.",
+        "train_dev_eval_isolation": "No file, speaker, or attack scenario may appear in more than one of the train/dev/eval sets. Respect the dataset\u2019s own partitioning.",
+        "class_balance": "Within each split, ensure class balance within \u00b110%; if necessary, downsample the majority class."
+      }
+    },
+    "feature_extraction": {
+      "frontend": "Pretrained x-vector or ECAPA-TDNN style speaker embedding network from an open-source speech toolkit (e.g., SpeechBrain or pyannote.audio).",
+      "input_representation": "Log-mel spectrogram, 80 mel bins, 25 ms window, 10 ms hop; normalization per-utterance.",
+      "embedding_dim": "Typically 192\u2013512 depending on chosen model (record exact dimension in evidence).",
+      "processing": "One fixed-size embedding per utterance (mean-pool over frame-level embeddings if applicable)."
+    },
+    "model": {
+      "type": "Shallow classifier operating on frozen embeddings.",
+      "options": [
+        "Logistic regression with L2 regularization (primary choice).",
+        "Linear SVM (optional sensitivity check)."
+      ],
+      "training_regime": {
+        "optimizer": "LBFGS or equivalent for logistic regression; default solver in scikit-learn is acceptable if deterministic.",
+        "hyperparameters": {
+          "C": [
+            0.1,
+            1.0,
+            10.0
+          ],
+          "class_weight": "balanced"
+        },
+        "selection": "Grid search over C using dev split; select model with lowest EER on dev. Tie-breaker is highest AUC-ROC."
+      }
+    },
+    "serving": {
+      "packaging": "Stateless HTTP service exposing a /score endpoint that accepts audio and returns a synthetic probability score.",
+      "implementation": "Reference implementation in Python (e.g., FastAPI), with embeddings and classifier loaded into memory on startup.",
+      "latency_target": "End-to-end per-utterance scoring p95 latency < 300 ms on a single CPU-only server for 3-second clips."
+    }
+  },
+  "treatment": {
+    "description": "The same detection pipeline as the baseline, with one controlled improvement: fine-tuning the embedding model on the synthetic-vs-human task using the train split before training the classifier. This treatment is defined only to ensure experimental comparability but is not required to be superior.",
+    "differences_from_baseline": {
+      "data": "Identical datasets, preprocessing, and splits as the baseline.",
+      "feature_extraction": "Initialize from the same pretrained embedding network but unfreeze the last N layers (e.g., last 1\u20132 blocks) and fine-tune on the classification objective using the train split.",
+      "model": {
+        "type": "End-to-end model with a small classification head added on top of the embedding network.",
+        "training_regime": {
+          "loss": "Binary cross-entropy.",
+          "optimizer": "Adam or AdamW.",
+          "learning_rates": {
+            "backbone": "e.g., 1e-5",
+            "head": "e.g., 1e-4"
+          },
+          "schedule": "Fixed or simple step decay; early stopping based on dev EER."
+        }
+      },
+      "serving": "Expose the same API contract as the baseline. Measure differences in latency and resource utilization under the same workloads."
+    }
+  },
+  "workloads": [
+    {
+      "name": "wl-inference-asvspoof-eval",
+      "description": "Batch scoring of the official ASVspoof 2019 LA eval split to generate metrics and curves.",
+      "inputs": {
+        "dataset": "ASVspoof2019_LA_eval",
+        "num_samples": "All available samples in the eval split.",
+        "sample_duration_seconds": 3.0,
+        "sampling_strategy": "Use every file once; no augmentation.",
+        "input_format": "File paths to WAV audio preprocessed as per baseline."
+      },
+      "execution": {
+        "mode": "Offline batch inference.",
+        "concurrency": 1,
+        "order": "Deterministic, lexicographically sorted file list.",
+        "random_seeds": {
+          "python": 1234,
+          "numpy": 1234,
+          "torch_or_tf": 1234
+        }
+      },
+      "outputs": {
+        "per_sample": [
+          "file_id",
+          "ground_truth_label (synthetic_voice|natural_voice)",
+          "model_score (continuous, 0\u20131 probability or logit)",
+          "predicted_label (for fixed threshold(s) recorded in evidence)."
+        ]
+      }
+    },
+    {
+      "name": "wl-inference-asvspoof-dev",
+      "description": "Batch scoring of the ASVspoof 2019 LA dev split for hyperparameter tuning and threshold calibration.",
+      "inputs": {
+        "dataset": "ASVspoof2019_LA_dev",
+        "num_samples": "All available samples in the dev split.",
+        "sample_duration_seconds": 3.0,
+        "sampling_strategy": "Use every file once; no augmentation."
+      },
+      "execution": {
+        "mode": "Offline batch inference.",
+        "concurrency": 1,
+        "order": "Deterministic, lexicographically sorted file list.",
+        "random_seeds": {
+          "python": 1234,
+          "numpy": 1234,
+          "torch_or_tf": 1234
+        }
+      },
+      "outputs": {
+        "per_sample": [
+          "file_id",
+          "ground_truth_label",
+          "model_score"
+        ]
+      }
+    },
+    {
+      "name": "wl-inference-ood-vctk",
+      "description": "Optional out-of-domain evaluation using VCTK-based synthetic and natural voices to test robustness.",
+      "inputs": {
+        "dataset": "VCTK_mixed_ood",
+        "num_samples": "Configurable; recommended 5,000\u201320,000 balanced examples.",
+        "sample_duration_seconds": 3.0
+      },
+      "execution": {
+        "mode": "Offline batch inference.",
+        "concurrency": 1,
+        "order": "Deterministic, lexicographically sorted file list."
+      },
+      "outputs": {
+        "per_sample": [
+          "file_id",
+          "ground_truth_label",
+          "model_score"
+        ]
+      }
+    },
+    {
+      "name": "wl-online-throughput-smoke",
+      "description": "Synthetic load test against the deployed HTTP API to confirm practical service viability for enterprise integration pilots.",
+      "inputs": {
+        "source_dataset": "Random 1,000 clips per class from ASVspoof2019_LA_eval.",
+        "request_pattern": "Poisson arrivals approximated via a fixed QPS ramp.",
+        "load_profile": [
+          {
+            "phase": "warmup",
+            "duration_seconds": 60,
+            "target_qps": 5
+          },
+          {
+            "phase": "sustained",
+            "duration_seconds": 300,
+            "target_qps": 20
+          }
+        ]
+      },
+      "execution": {
+        "mode": "Online via HTTP /score endpoint.",
+        "concurrency": "As required to achieve target_qps (e.g., 10\u201350 parallel clients).",
+        "metrics_collection": "Collect latency, error rate, and CPU/memory utilization."
+      },
+      "outputs": {
+        "aggregate": [
+          "p50_latency_ms",
+          "p95_latency_ms",
+          "p99_latency_ms",
+          "throughput_qps",
+          "http_5xx_rate",
+          "cpu_utilization_pct",
+          "memory_utilization_mb"
+        ]
+      }
+    }
+  ],
+  "controls": {
+    "data_controls": [
+      "Use the exact same train/dev/eval splits for baseline and treatment.",
+      "Ensure class balance per split within \u00b110%.",
+      "Do not leak eval or dev data into training or fine-tuning.",
+      "Document dataset versions, download URLs, and integrity hashes."
+    ],
+    "randomness_controls": [
+      "Set and log fixed random seeds (Python, NumPy, and ML framework).",
+      "Disable non-deterministic CuDNN algorithms where applicable or record their use.",
+      "Shuffle training data with the same seed for all runs."
+    ],
+    "preprocessing_controls": [
+      "Use identical audio preprocessing across baseline and treatment (resampling, mono conversion, normalization, fixed-length cropping/padding).",
+      "Use identical feature front-end parameters (mel bins, window size, hop length)."
+    ],
+    "training_controls": [
+      "Use the same number of training epochs or early-stopping patience across comparable models.",
+      "Use the same batch size within hardware limits.",
+      "Record all hyperparameters and keep them constant except where explicitly part of the treatment."
+    ],
+    "evaluation_controls": [
+      "Compute metrics on the same evaluation sets and in the same order.",
+      "Do not tune thresholds on eval; thresholds must be derived from dev or pre-defined policies.",
+      "Log the entire score distribution for post-hoc analysis."
+    ],
+    "operational_controls": [
+      "Run latency and throughput measurements on the same hardware profile.",
+      "Ensure no unrelated background jobs run on the evaluation machine during performance tests.",
+      "Use the same API envelope and serialization formats across baseline and treatment."
+    ]
+  },
+  "metrics": [
+    {
+      "name": "eer",
+      "description": "Equal Error Rate: point where false acceptance rate equals false rejection rate.",
+      "unit": "fraction (0\u20131)",
+      "aggregation": "Computed from all scores on a given eval split."
+    },
+    {
+      "name": "auc_roc",
+      "description": "Area under the Receiver Operating Characteristic curve.",
+      "unit": "fraction (0\u20131)",
+      "aggregation": "Computed from all scores on a given eval split."
+    },
+    {
+      "name": "tpr_at_fixed_fpr_001",
+      "description": "True Positive Rate when False Positive Rate is constrained at 1%.",
+      "unit": "fraction (0\u20131)",
+      "aggregation": "Computed from ROC curve on a given eval split."
+    },
+    {
+      "name": "tpr_at_fixed_fpr_0001",
+      "description": "True Positive Rate when False Positive Rate is constrained at 0.1%.",
+      "unit": "fraction (0\u20131)",
+      "aggregation": "Computed from ROC curve on a given eval split."
+    },
+    {
+      "name": "accuracy_at_policized_threshold",
+      "description": "Overall classification accuracy at a threshold selected from the dev set to approximate an enterprise-relevant operating point (e.g., FPR <= 1%).",
+      "unit": "fraction (0\u20131)",
+      "aggregation": "Computed separately on dev and eval splits."
+    },
+    {
+      "name": "fpr_at_policized_threshold",
+      "description": "False Positive Rate at the dev-selected threshold.",
+      "unit": "fraction (0\u20131)",
+      "aggregation": "Computed separately on dev and eval splits."
+    },
+    {
+      "name": "fnr_at_policized_threshold",
+      "description": "False Negative Rate at the dev-selected threshold.",
+      "unit": "fraction (0\u20131)",
+      "aggregation": "Computed separately on dev and eval splits."
+    },
+    {
+      "name": "p50_latency_ms",
+      "description": "Median per-request end-to-end scoring latency for the online API under workload wl-online-throughput-smoke.",
+      "unit": "milliseconds",
+      "aggregation": "Median over all successful requests."
+    },
+    {
+      "name": "p95_latency_ms",
+      "description": "95th percentile per-request latency.",
+      "unit": "milliseconds",
+      "aggregation": "95th percentile over all successful requests."
+    },
+    {
+      "name": "throughput_qps",
+      "description": "Average queries per second sustained during the sustained phase of the load test.",
+      "unit": "queries_per_second",
+      "aggregation": "Average over the sustained phase window."
+    },
+    {
+      "name": "cpu_utilization_pct",
+      "description": "Average CPU utilization of the scoring service process during the sustained load phase.",
+      "unit": "percent",
+      "aggregation": "Average over sustained phase."
+    },
+    {
+      "name": "memory_utilization_mb",
+      "description": "Average resident memory used by the scoring service during the sustained load phase.",
+      "unit": "megabytes",
+      "aggregation": "Average over sustained phase."
+    }
+  ],
+  "success_criteria": {
+    "statistical": [
+      "On ASVspoof2019_LA_eval, the baseline pipeline achieves eer <= 0.20 (20%) and auc_roc >= 0.85. These thresholds are illustrative for a non-trivial baseline; if not met, document reasons and dataset/model mismatches.",
+      "The difference in eer between repeated baseline runs with identical seeds and environment should be <= 0.01 absolute, demonstrating practical reproducibility.",
+      "If the treatment is evaluated, any claimed improvement must be supported by consistent betterment of eer and auc_roc on both dev and eval splits, not just one."
+    ],
+    "operational": [
+      "Under wl-online-throughput-smoke on reference hardware, p95_latency_ms <= 300 ms and http_5xx_rate <= 0.5%.",
+      "The service must correctly log every detection request and response according to the evidence_schema, with no missing or malformed entries in more than 0.1% of requests.",
+      "API contract remains stable; no schema-breaking changes occur between baseline and treatment runs."
+    ],
+    "governance_and_enterprise_relevance": [
+      "All datasets and models used must have licenses compatible with internal enterprise experimentation (no undisclosed proprietary data).",
+      "Data retention options and log content must be configurable to comply with typical enterprise privacy requirements (e.g., ability to drop raw audio and retain only derived features and scores).",
+      "The experiment setup, hyperparameters, and exact commit hashes of the repository must be captured so that another team can reproduce results within reasonable variance."
+    ]
+  },
+  "failure_modes": [
+    {
+      "name": "data_leakage_between_splits",
+      "description": "Accidental reuse of the same utterances or speakers across train, dev, and eval, leading to overly optimistic metrics.",
+      "detection": "Cross-check file IDs and speaker IDs for overlap; report overlap rate in evidence.",
+      "mitigation": "Re-build splits and re-train; discard contaminated results."
+    },
+    {
+      "name": "overfitting_to_asvspoof_attacks",
+      "description": "Model exploits narrow artifacts specific to ASVspoof attack implementations, resulting in poor generalization to different synthetic voices (e.g., VCTK-based or future TTS models).",
+      "detection": "Large gap between ASVspoof eval performance and ood VCTK performance (e.g., eer_ood > eer_asvspoof + 0.15).",
+      "mitigation": "Document this limitation explicitly; consider diversifying training data in later chapters, but keep the baseline as-is for comparability."
+    },
+    {
+      "name": "domain_mismatch_to_enterprise_audio",
+      "description": "Baseline results on curated datasets do not translate to noisy, codec-compressed, or multilingual contact center audio.",
+      "detection": "Qualitative review and, if possible, pilot testing on a small internal dataset reveal degraded performance.",
+      "mitigation": "Flag the baseline as a best-case indicator only; use it as a relative benchmark for alternative methods rather than an absolute readiness signal."
+    },
+    {
+      "name": "non_deterministic_hardware_behavior",
+      "description": "Differences in GPU/CPU libraries and kernel versions introduce subtle non-determinism in training and inference.",
+      "detection": "Repeated runs with identical seeds produce metric differences above expected variance (e.g., eer difference > 0.02).",
+      "mitigation": "Pin framework versions, document hardware and drivers, and where necessary switch to CPU-only inference for published baseline numbers."
+    },
+    {
+      "name": "latency_regressions_in_serving",
+      "description": "Embedding extraction and model scoring are too slow for practical integration into contact center flows.",
+      "detection": "Online throughput tests fail p95 latency targets or encounter sustained high CPU utilization.",
+      "mitigation": "Profile the service, enable model quantization or batching, or clearly document that the baseline is offline/batch-only for some environments."
+    },
+    {
+      "name": "logging_and_privacy_misconfiguration",
+      "description": "Detection logs inadvertently include sensitive personal data (e.g., full call recordings, customer identifiers) without appropriate controls.",
+      "detection": "Audit of log samples reveals presence of raw audio or PII beyond what is specified in evidence_schema.",
+      "mitigation": "Strip or hash identifiers; log only necessary metadata and derived features; align with internal privacy policies before production-like use."
+    }
+  ],
+  "required_environment": {
+    "hardware": {
+      "minimum": {
+        "cpu": "4 physical cores (x86_64 or ARM64) with AVX2 or equivalent.",
+        "memory_gb": 16,
+        "storage_gb": 50,
+        "gpu": "Not required for inference; optional for faster fine-tuning (e.g., 1 consumer-grade GPU with >= 8 GB VRAM)."
+      },
+      "reference_for_metrics": {
+        "cpu": "8-core server-class CPU (e.g., Intel Xeon or AMD EPYC) for published latency/throughput.",
+        "memory_gb": 32,
+        "gpu": "Single NVIDIA T4 or equivalent if treatment fine-tuning is performed."
+      }
+    },
+    "software": {
+      "os": "Linux (Ubuntu 20.04+ recommended); macOS acceptable for development but not for reference metrics.",
+      "runtime": {
+        "python_version": "3.10.x (pin exact minor and patch version)."
+      },
+      "packages": {
+        "core": [
+          "numpy",
+          "scipy",
+          "pandas",
+          "scikit-learn",
+          "matplotlib",
+          "seaborn"
+        ],
+        "audio": [
+          "librosa",
+          "soundfile",
+          "torchaudio"
+        ],
+        "ml_framework": [
+          "torch (PyTorch) or equivalent, with pinned version and CUDA/cuDNN versions if applicable"
+        ],
+        "speech_toolkit": [
+          "speechbrain or pyannote.audio (exact model name and version pinned)"
+        ],
+        "api_server": [
+          "fastapi",
+          "uvicorn",
+          "pydantic"
+        ],
+        "observability": [
+          "prometheus_client or equivalent metrics exporter (optional but recommended)"
+        ]
+      },
+      "system_dependencies": [
+        "ffmpeg or sox for consistent audio conversion.",
+        "Git for repository checkout."
+      ]
+    },
+    "repository_layout": {
+      "url": "https://github.com/bookauthority/securing-call",
+      "expected_structure": {
+        "chapter_5/": [
+          "notebooks/ (exploratory EDA and plotting of ROC/EER).",
+          "scripts/ (data prep, feature extraction, training, evaluation).",
+          "service/ (API implementation, Dockerfile, deployment configs).",
+          "configs/ (YAML/JSON configs for experiments and environments)."
+        ]
+      }
+    }
+  },
+  "run_instructions": {
+    "overview": "These steps define a reproducible path to run the baseline experiment, train the model, evaluate metrics, and deploy the reference service. All commands are indicative; exact paths/scripts must match the repository implementation.",
+    "steps": [
+      {
+        "step": 1,
+        "title": "Clone repository and set up environment",
+        "actions": [
+          "Clone the companion repository: `git clone https://github.com/bookauthority/securing-call.git`.",
+          "Checkout the tag or branch corresponding to the book release: e.g., `git checkout v1.0-ch5-baseline`.",
+          "Create and activate a Python virtual environment (e.g., `python3.10 -m venv .venv && source .venv/bin/activate`).",
+          "Install dependencies: `pip install -r chapter_5/requirements.txt`.",
+          "Verify versions: run `python chapter_5/scripts/print_env.py` (or equivalent) to record Python, package, and CUDA versions."
+        ]
+      },
+      {
+        "step": 2,
+        "title": "Download and prepare datasets",
+        "actions": [
+          "Download ASVspoof 2019 LA data following the dataset\u2019s license and usage terms. Store raw archives under `data/raw/asvspoof2019_LA/`.",
+          "Optionally download VCTK and any associated synthetic-voice releases, storing under `data/raw/vctk/`.",
+          "Run the data preparation script: `python chapter_5/scripts/prepare_data_asvspoof.py --config chapter_5/configs/asvspoof_prep.yaml`.",
+          "Confirm that processed WAV files and manifest CSV/JSON files are created under `data/processed/asvspoof2019_LA/` with explicit split labels (train/dev/eval).",
+          "Inspect a small sample of manifests to ensure correct labels and no obvious leakage."
+        ]
+      },
+      {
+        "step": 3,
+        "title": "Extract embeddings",
+        "actions": [
+          "Configure the embedding model in `chapter_5/configs/embeddings.yaml` (e.g., specify SpeechBrain x-vector model name and checkpoint).",
+          "Run embedding extraction for train/dev/eval: `python chapter_5/scripts/extract_embeddings.py --config chapter_5/configs/embeddings_asvspoof.yaml`.",
+          "This should produce feature files (e.g., `.npy` or HDF5) and corresponding index files under `features/asvspoof2019_LA/{train,dev,eval}/`.",
+          "Optionally run a verification script `python chapter_5/scripts/check_embeddings.py` to print embedding shapes, basic statistics, and sample labels."
+        ]
+      },
+      {
+        "step": 4,
+        "title": "Train baseline classifier",
+        "actions": [
+          "Set baseline classifier parameters in `chapter_5/configs/baseline_logreg.yaml` (including C grid, class_weight, and random seed).",
+          "Train the classifier: `python chapter_5/scripts/train_classifier.py --config chapter_5/configs/baseline_logreg.yaml`.",
+          "The script should: (a) load train/dev embeddings, (b) run cross-validated hyperparameter search on dev, (c) select the best C based on dev EER, (d) save the trained model and scaler under `models/baseline_logreg/`.",
+          "Capture a training summary JSON (e.g., `training_summary.json`) including hyperparameters, dev metrics, and paths to artifacts."
+        ]
+      },
+      {
+        "step": 5,
+        "title": "Evaluate baseline and compute metrics",
+        "actions": [
+          "Run evaluation on dev and eval splits: `python chapter_5/scripts/evaluate_classifier.py --config chapter_5/configs/baseline_logreg_eval.yaml`.",
+          "The evaluation script should output: (a) per-sample scores and labels to `results/baseline_logreg/{dev,eval}_scores.csv`, and (b) aggregate metrics to `results/baseline_logreg/metrics.json`.",
+          "Generate ROC and DET curves and save as PNG/SVG in `results/baseline_logreg/plots/`.",
+          "Use a utility script or notebook (e.g., `chapter_5/notebooks/05_eer_roc_analysis.ipynb`) to compute EER, AUC-ROC, TPR at fixed FPRs, and thresholds for desired operating points."
+        ]
+      },
+      {
+        "step": 6,
+        "title": "Deploy baseline as a service",
+        "actions": [
+          "Configure the API service in `chapter_5/service/config.yaml`, pointing to the trained embedding model and classifier artifact paths.",
+          "Start the service locally: `uvicorn chapter_5.service.app:app --host 0.0.0.0 --port 8000`.",
+          "Test the `/health` and `/score` endpoints using provided sample audio: `python chapter_5/scripts/test_api.py --audio examples/sample_synthetic.wav`.",
+          "Optionally, build a Docker image: `docker build -t securing-call-ch5-baseline:latest chapter_5/service/` and run with pinned resource limits."
+        ]
+      },
+      {
+        "step": 7,
+        "title": "Run online smoke test",
+        "actions": [
+          "Prepare a subset of eval clips for load testing using `chapter_5/scripts/prepare_load_test_set.py`.",
+          "Execute the load test with a tool such as Locust, k6, or a custom script, e.g.: `python chapter_5/scripts/run_load_test.py --config chapter_5/configs/load_test.yaml`.",
+          "Collect latency and resource metrics and export them to `results/baseline_logreg/online_metrics.json`.",
+          "Verify that online metrics meet or are close to the target operational thresholds defined in success_criteria; if not, document deviations."
+        ]
+      }
+    ]
+  },
+  "evidence_schema": {
+    "description": "Schema for capturing and storing experimental evidence so that teams can audit runs, reproduce results, and reason about applicability to their own environments.",
+    "artifacts": [
+      {
+        "name": "run_manifest",
+        "type": "json",
+        "location": "results/{run_id}/run_manifest.json",
+        "fields": {
+          "run_id": "Unique identifier for the experiment run (UUID).",
+          "timestamp_utc": "ISO 8601 timestamp when the run was initiated.",
+          "git_commit": "Git commit hash of the repository at run time.",
+          "chapter": "e.g., 5",
+          "experiment_id": "exp-ch5-baseline-synth-voice-det-v1",
+          "mode": "baseline or treatment",
+          "hardware": {
+            "cpu_model": "String identifier for CPU.",
+            "num_cores": "Integer count of logical cores.",
+            "gpu_model": "String identifier if present, else null.",
+            "memory_gb": "Total system memory in GB."
+          },
+          "software": {
+            "os": "OS name and version.",
+            "python_version": "Python interpreter version.",
+            "package_versions": "Map of package names to exact versions."
+          },
+          "random_seeds": {
+            "python": "Integer seed.",
+            "numpy": "Integer seed.",
+            "ml_framework": "Integer seed."
+          },
+          "configs": {
+            "data_prep_config_path": "Path to data prep config file used.",
+            "embedding_config_path": "Path to embedding config file.",
+            "model_config_path": "Path to classifier or end-to-end model config.",
+            "api_config_path": "Path to service config (if applicable)."
+          }
+        }
+      },
+      {
+        "name": "data_manifest",
+        "type": "json",
+        "location": "results/{run_id}/data_manifest.json",
+        "fields": {
+          "datasets": [
+            {
+              "name": "e.g., ASVspoof2019_LA",
+              "version": "Dataset release version, if applicable.",
+              "split": "train|dev|eval|ood",
+              "num_samples": "Integer count of utterances.",
+              "class_distribution": {
+                "synthetic_voice": "Count of synthetic samples.",
+                "natural_voice": "Count of natural samples."
+              },
+              "speaker_count": "Number of unique speakers, if available.",
+              "source_path": "Local path or storage URI.",
+              "hashes": {
+                "manifest_md5": "MD5 or SHA256 of manifest file.",
+                "example_file_md5": "Optional sample hash for integrity."
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "training_log",
+        "type": "jsonl",
+        "location": "results/{run_id}/training_log.jsonl",
+        "fields_per_line": {
+          "epoch": "Integer training epoch.",
+          "split": "train or dev.",
+          "loss": "Average loss over the epoch.",
+          "eer": "Computed EER on split at this epoch, if computed.",
+          "auc_roc": "AUC-ROC on split at this epoch, if computed.",
+          "timestamp_utc": "Timestamp for the logged metrics."
+        }
+      },
+      {
+        "name": "model_card",
+        "type": "json",
+        "location": "results/{run_id}/model_card.json",
+        "fields": {
+          "model_name": "Human-readable model name, e.g., 'baseline_logreg_xvector_asvspoof'.",
+          "version": "Semantic version or run_id reference.",
+          "intended_use": "Short text describing intended experimental use (not production).",
+          "training_data_summary": "Reference to data_manifest entries used for training.",
+          "known_limitations": "List referencing failure_modes relevant to this model.",
+          "metrics_summary": "Key metrics on dev and eval splits (EER, AUC-ROC, etc.).",
+          "thresholds": [
+            {
+              "name": "policy_threshold_1",
+              "description": "Threshold tuned from dev set for FPR ~1%.",
+              "value": "Numeric threshold on model_score.",
+              "dev_fpr": "False positive rate on dev at this threshold.",
+              "dev_fnr": "False negative rate on dev at this threshold."
+            }
+          ]
+        }
+      },
+      {
+        "name": "per_sample_scores",
+        "type": "csv",
+        "location": "results/{run_id}/{split}_scores.csv",
+        "fields": {
+          "file_id": "Unique identifier of the audio file within the dataset.",
+          "dataset_name": "Name of dataset (e.g., ASVspoof2019_LA).",
+          "split": "train|dev|eval|ood",
+          "ground_truth_label": "synthetic_voice|natural_voice",
+          "model_score": "Continuous score from the classifier (probability or logit).",
+          "predicted_label_at_policy_threshold": "synthetic_voice|natural_voice based on selected threshold.",
+          "timestamp_utc": "Time of scoring (optional for offline runs)."
+        }
+      },
+      {
+        "name": "aggregate_metrics",
+        "type": "json",
+        "location": "results/{run_id}/metrics.json",
+        "fields": {
+          "splits": {
+            "dev": {
+              "eer": "Numeric EER on dev.",
+              "auc_roc": "Numeric AUC-ROC on dev.",
+              "tpr_at_fixed_fpr_001": "Numeric TPR at FPR 1% on dev.",
+              "tpr_at_fixed_fpr_0001": "Numeric TPR at FPR 0.1% on dev.",
+              "accuracy_at_policized_threshold": "Accuracy on dev at threshold derived from dev.",
+              "fpr_at_policized_threshold": "FPR on dev at that threshold.",
+              "fnr_at_policized_threshold": "FNR on dev at that threshold."
+            },
+            "eval": {
+              "eer": "Numeric EER on eval.",
+              "auc_roc": "Numeric AUC-ROC on eval.",
+              "tpr_at_fixed_fpr_001": "Numeric TPR at FPR 1% on eval.",
+              "tpr_at_fixed_fpr_0001": "Numeric TPR at FPR 0.1% on eval.",
+              "accuracy_at_policized_threshold": "Accuracy on eval at threshold selected from dev.",
+              "fpr_at_policized_threshold": "FPR on eval at that threshold.",
+              "fnr_at_policized_threshold": "FNR on eval at that threshold."
+            }
+          }
+        }
+      },
+      {
+        "name": "service_logs",
+        "type": "jsonl",
+        "location": "logs/service/{date}/detections.jsonl",
+        "fields_per_line": {
+          "request_id": "Unique identifier for the API request.",
+          "timestamp_utc": "Time at which request was processed.",
+          "caller_context": {
+            "channel": "e.g., lab_test; in enterprise integration, may include 'ivr', 'agent_desktop', etc.",
+            "session_id": "Optional correlation ID; hashed or pseudonymized in examples.",
+            "call_direction": "inbound|outbound|null for lab tests."
+          },
+          "audio_metadata": {
+            "duration_seconds": "Duration of the audio segment processed.",
+            "sample_rate_hz": "Effective sample rate after preprocessing.",
+            "codec": "Input codec before normalization (if known)."
+          },
+          "model_metadata": {
+            "model_name": "Deployed model name.",
+            "model_version": "Version or run_id.",
+            "pipeline_latency_ms": "End-to-end latency for this request."
+          },
+          "detection_result": {
+            "score": "Model score for synthetic_voice.",
+            "threshold_applied": "Threshold value used, if any.",
+            "decision": "synthetic_voice|natural_voice|undecided",
+            "confidence_band": "Optional coarse bucket (e.g., low|medium|high) based on score."
+          }
+        }
+      },
+      {
+        "name": "online_metrics_summary",
+        "type": "json",
+        "location": "results/{run_id}/online_metrics.json",
+        "fields": {
+          "workload_name": "e.g., wl-online-throughput-smoke.",
+          "p50_latency_ms": "Median latency from online test.",
+          "p95_latency_ms": "95th percentile latency.",
+          "p99_latency_ms": "99th percentile latency, if measured.",
+          "throughput_qps": "Average QPS during sustained phase.",
+          "http_5xx_rate": "Fraction of requests resulting in 5xx responses.",
+          "cpu_utilization_pct": "Average CPU utilization.",
+          "memory_utilization_mb": "Average resident memory during test."
+        }
+      }
+    ]
+  }
+}

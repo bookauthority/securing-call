@@ -1,0 +1,888 @@
+{
+  "experiment_id": "exp-07-voice-verification-stepup-liveness-abtest",
+  "hypothesis": "In a contact-center authentication flow, adding voice-based speaker verification plus an active liveness challenge as a step-up factor (treatment) will reduce successful fraudulent account access by at least 30% relative to knowledge-based authentication (baseline), while increasing average handle time and customer drop-off by no more than 10%, when evaluated on comparable call workloads.",
+  "baseline": {
+    "description": "Existing risk-based call authentication without biometric voice factors. Callers are authenticated using standard knowledge-based authentication (KBA) and existing account/device risk scores. No speaker verification or voice liveness checks are used.",
+    "authentication_flow": [
+      "Inbound call arrives via telephony/CCaaS platform.",
+      "IVR or agent collects account identifier (e.g., phone number, account number).",
+      "Risk engine evaluates device, phone number reputation, recent activity, and transaction context.",
+      "If risk score < baseline_threshold_low_risk: lightweight KBA (e.g., 1\u20132 questions) or trust-on-device may be sufficient.",
+      "If baseline_threshold_low_risk <= risk score < baseline_threshold_high_risk: standard KBA (e.g., 3\u20135 questions covering DOB, postal code, recent transactions).",
+      "If risk score >= baseline_threshold_high_risk: escalate to enhanced KBA (e.g., one-time password via SMS/email, or callback to registered number).",
+      "On successful KBA/OTP, agent or system permits sensitive actions; on failure, call is limited to low-risk actions or terminated."
+    ],
+    "biometric_and_liveness": {
+      "speaker_verification": "Disabled.",
+      "liveness_challenge": "Not applicable.",
+      "voice_biometric_enrollment": "Not performed; no stored speaker embeddings or voiceprints."
+    },
+    "journey_placement": "Authentication occurs early in the call before allowing profile changes, high-value transfers, or disclosure of sensitive information. Voice is used only for ASR or call recording, not for verification.",
+    "risk_engine_integration": {
+      "inputs": [
+        "ANI/CLI (caller number) reputation score",
+        "Device/telecom risk (e.g., SIM swap signals, call forwarding flags where available)",
+        "Account history (time since last login/call, recent transactions, failed logins)",
+        "Geo/IP (for digital channels, if any cross-reference is available)",
+        "Historical fraud labels for account/phone",
+        "Channel context (IVR self-service vs. live agent, language, queue type)"
+      ],
+      "decision": "Outputs a scalar risk_score_baseline in [0, 1] used to decide level of KBA required."
+    }
+  },
+  "treatment": {
+    "description": "Layered authentication that introduces voice-based speaker verification and active liveness checks as a step-up factor on top of existing KBA and risk scoring. Voice biometrics are only used where appropriate consent has been captured and stored.",
+    "authentication_flow": [
+      "Inbound call arrives via telephony/CCaaS platform.",
+      "IVR or agent collects account identifier; risk engine computes initial risk_score_treatment using the same features and thresholds as baseline.",
+      "System checks voice biometric consent and enrollment status for the asserted account.",
+      "Branch A (enrolled + consented, low/medium risk):",
+      "  - System prompts caller to speak a short random phrase or passphrase (text-dependent) or conducts a brief free-speech capture (text-independent), depending on prototype configuration.",
+      "  - Speaker verification model generates an embedding, compares it against stored template(s), and outputs a similarity score.",
+      "  - In-medium or high-risk cases, an active liveness challenge is triggered (e.g., challenge phrase with randomized digits/words or simple actions like 'say the color of the word you see in your app now'), collected and scored by a liveness model or rule-based check.",
+      "  - Risk engine fuses risk_score_treatment, speaker_score, and liveness_score into a combined_auth_risk_score.",
+      "  - If combined_auth_risk_score < treatment_pass_threshold: reduce KBA burden (e.g., 0\u20132 questions) and allow sensitive actions; otherwise fall back to enhanced KBA/OTP or partial denial.",
+      "Branch B (not enrolled, no consent, or regulatory exclusion):",
+      "  - Fallback to baseline KBA flow, but with optional soft enrollment invitation if jurisdiction and policy allow.",
+      "Branch C (very high risk irrespective of voice):",
+      "  - Require both successful voice verification+liveness AND an out-of-band factor (OTP or callback) or route to a specialist fraud agent with restricted permissions."
+    ],
+    "biometric_and_liveness": {
+      "speaker_verification": {
+        "mode": "Prototype supports both text-dependent and text-independent configurations; experimenters must choose one as primary for a given run and keep it constant during measurement.",
+        "models": [
+          "Pre-trained speaker embedding model (e.g., ECAPA-TDNN or x-vector variant) from a public repository such as SpeechBrain or PyTorch Hub.",
+          "Simple backend scorer (e.g., cosine similarity over embeddings or PLDA) with thresholds tuned using a held-out dataset."
+        ],
+        "enrollment_process": [
+          "Explicit consent capture with jurisdiction-specific language (out of scope for this experiment\u2019s implementation, but must be affirmed in metadata).",
+          "Collection of N_enroll utterances per customer (e.g., 3\u20135 short phrases or 20\u201330 seconds of speech over one or more calls).",
+          "Computation and storage of one or more averaged enrollment embeddings per account.",
+          "Storage in a secure, access-controlled feature store with encryption at rest and in transit, plus a revocation flag."
+        ]
+      },
+      "liveness_challenge": {
+        "type": "Active liveness via randomized challenge phrases with unpredictable content that is difficult for real-time voice-cloning systems to synthesize and play back without noticeable latency or artifacts.",
+        "challenge_generation": [
+          "Random selection from challenge templates (e.g., 'Please say: <digit> <color> <weekday>', 'Please repeat: <short phrase> but change the last word to <other word>').",
+          "Ensure that phrase content is not published in a static list that an attacker can pre-synthesize; randomness must be derived from a secure PRNG.",
+          "Record audio during the challenge window (e.g., 3\u20136 seconds), tag with challenge_id and expected_text."
+        ],
+        "verification_methods": [
+          "ASR-based check that recognized text matches the expected phrase pattern with configurable tolerance.",
+          "Timing-based checks (latency between prompt end and speech onset, overall duration).",
+          "Optional basic spectral/embedding anomaly heuristics (e.g., compare to natural voice baseline for that caller)."
+        ]
+      }
+    },
+    "risk_engine_integration": {
+      "inputs": [
+        "All baseline risk engine inputs.",
+        "speaker_verification_score (normalized to [0, 1]).",
+        "liveness_score (normalized to [0, 1], including a hard-fail flag if ASR mismatch or impossible timing).",
+        "biometric_enrollment_status (boolean).",
+        "biometric_consent_status (boolean and jurisdiction code)."
+      ],
+      "fusion_logic": "A configurable function (e.g., logistic regression or weighted linear combination) that outputs combined_auth_risk_score in [0, 1]. The function must be fixed for the duration of the experiment and documented in configuration.",
+      "example_fusion": "combined_auth_risk_score = w_risk * risk_score_treatment + w_spk * (1 - speaker_verification_score) + w_live * (1 - liveness_score)"
+    },
+    "journey_placement": "Voice verification and liveness are used as step-up factors only when (a) the caller\u2019s risk score is above a configurable threshold but below a hard-block threshold, and (b) the caller is about to perform medium- or high-risk actions (e.g., funds transfer, adding a new payee, changing email/phone, disclosing sensitive data). Low-risk informational calls are not subjected to biometric checks.",
+    "data_protection_and_consent": {
+      "requirements_for_inclusion": [
+        "Only callers with recorded, auditable biometric consent may be included in treatment speaker verification flows, in jurisdictions where this is legally permitted.",
+        "Voice embeddings are stored as regulated data with appropriate access controls; raw audio may be stored or discarded based on local policy but must not be repurposed beyond authentication and fraud defense.",
+        "Customers must be able to revoke consent, which disables use of speaker verification for that account and triggers deletion or archiving in accordance with policy; revoked accounts must be treated as baseline for experimentation."
+      ]
+    }
+  },
+  "workloads": [
+    {
+      "name": "WL1_production_like_live_calls",
+      "description": "A live, randomized subset of inbound production calls from consenting, enrolled customers routed either to baseline or treatment flows via an A/B router for a fixed evaluation window.",
+      "population": {
+        "inclusion_criteria": [
+          "Customer is already enrolled in voice biometrics with valid consent and at least N_enroll high-quality enrollment utterances.",
+          "Call is categorized as medium or high risk based on transaction type or requested operation (e.g., password reset, address change, large transfer).",
+          "Jurisdiction and policy permit biometric authentication for this use case."
+        ],
+        "exclusion_criteria": [
+          "Known fraud accounts flagged for law-enforcement monitoring (to avoid experiment bias or interference).",
+          "Regulatory or contractual prohibitions on biometric processing (e.g., local laws or customer segment opt-outs).",
+          "Calls with technical issues affecting audio quality beyond defined thresholds (e.g., excessive packet loss, SNR below configured level)."
+        ]
+      },
+      "traffic_allocation": {
+        "strategy": "Randomized controlled trial (parallel A/B test).",
+        "allocation_ratios": {
+          "baseline": 0.5,
+          "treatment": 0.5
+        },
+        "randomization_unit": "Call-level randomization stratified by account_id and risk band to balance demographics, languages, and risk distributions across arms.",
+        "stratification_variables": [
+          "primary_language",
+          "risk_band (low/medium/high as defined by baseline risk engine)",
+          "call_reason_category (e.g., billing, account changes, support)",
+          "device/channel type where available (mobile, landline, VoIP)"
+        ]
+      },
+      "duration": "Minimum of 4\u20136 weeks or until pre-specified sample size for key metrics (e.g., fraud_events) is reached, whichever is longer.",
+      "environment": "Production-like telephony and CCaaS environment with the prototype deployed behind feature flags, monitored by observability tooling.",
+      "ethical_and_operational_notes": [
+        "Treatment must not materially reduce security for any subgroup compared with baseline; fail-closed behavior (fallback to baseline or stronger controls) is required on technical errors.",
+        "Customers may be informed of voice verification use via standard disclosures; the experiment itself should not rely on deception."
+      ]
+    },
+    {
+      "name": "WL2_offline_replay_benchmark",
+      "description": "Controlled offline replay of labeled audio sessions (genuine vs. known synthetic/attacker calls) through the baseline and treatment logic to estimate detection performance and thresholds before live deployment.",
+      "data_sources": [
+        "Historical genuine customer calls from consenting, enrolled users with no confirmed fraud during the call window.",
+        "Synthetic attacker calls generated via public or in-house voice cloning tools, using the same languages and call scripts, tagged with ground-truth labels.",
+        "High-risk fraud calls previously confirmed by investigations, where permissible to use for benchmarking."
+      ],
+      "usage": [
+        "Estimate ROC, EER, FAR, and FRR for the speaker verification prototype and liveness challenges.",
+        "Tune thresholds for speaker_verification_score and liveness_score before going live.",
+        "Perform adversarial spot checks (e.g., attacker playback of cloned voice) independent of production traffic."
+      ],
+      "randomization": "Offline data will be sampled and split into training, validation, and test partitions; the test partition must not be used for threshold tuning."
+    }
+  ],
+  "controls": {
+    "randomization_and_assignment": [
+      "Implement a deterministic randomization function that maps (account_id, call_id, experiment_id) to a uniform random number in [0, 1]; use this to assign each eligible call to baseline or treatment based on allocation_ratios.",
+      "Ensure that multiple calls from the same account across the experiment window are consistently assigned to the same arm, unless a deliberate crossover design is used and documented; for the default design, prefer account-level consistency to reduce contamination.",
+      "Log assignment decisions with timestamps and configuration version identifiers."
+    ],
+    "comparability_controls": [
+      "Monitor and enforce similarity of risk_score distributions across arms using periodic statistical checks; adjust stratification if imbalances emerge.",
+      "Ensure that the same risk engine version, thresholds, and non-voice features are used in both arms.",
+      "Maintain equivalent agent guidance and scripts except for authentication steps influenced by voice verification; avoid bias from differential coaching."
+    ],
+    "technical_controls": [
+      "Run both baseline and treatment pipelines in the same cloud region and infrastructure class to control for latency and availability differences.",
+      "Use the same ASR stack for liveness across treatment variants; do not change ASR models mid-experiment without versioning and documentation.",
+      "Implement health checks for speaker verification and liveness services; on failure, automatically fall back to baseline KBA for that call and mark it as 'baseline_effective' in logs."
+    ],
+    "privacy_and_consent_controls": [
+      "Exclude any call without recorded biometric consent from speaker verification flows; these calls must be routed to baseline logic even if the randomization function selects treatment.",
+      "Mask or tokenize personal identifiers in experimental logs; store linkage in a separate, access-controlled system if necessary for later analysis.",
+      "Respect data minimization and retention policies; ensure that experimental features do not log more sensitive data than necessary."
+    ],
+    "governance_controls": [
+      "Obtain approvals from security, privacy, and legal stakeholders before starting the experiment, including a documented DPIA/PIA where required.",
+      "Define an incident response protocol if unexpected increases in fraud or customer complaints are observed in either arm.",
+      "Configure real-time monitoring dashboards to detect metric anomalies (e.g., spike in failure-to-authenticate, drop-off) and provide a kill switch to revert all traffic to baseline if needed."
+    ]
+  },
+  "metrics": [
+    {
+      "name": "fraud_events",
+      "description": "Count of confirmed fraudulent account takeovers or high-impact fraudulent actions initiated via the phone channel during the experiment window, attributed to calls in each arm.",
+      "unit": "events",
+      "collection_method": "Derived from downstream fraud investigations, chargeback data, and case management labels linked back to original call IDs; requires lag-aware attribution windows.",
+      "aggregation": "Per arm, per risk_band, per week."
+    },
+    {
+      "name": "fraud_rate_per_10k_calls",
+      "description": "Number of confirmed fraud_events per 10,000 authenticated calls in a given arm.",
+      "unit": "events_per_10000_calls",
+      "collection_method": "fraud_events divided by authenticated_calls * 10,000.",
+      "aggregation": "Per arm, overall and by segment (language, geography, risk_band)."
+    },
+    {
+      "name": "authentication_success_rate",
+      "description": "Proportion of authentication attempts that successfully complete and allow requested sensitive actions.",
+      "unit": "ratio",
+      "collection_method": "Count of calls where authentication_result == 'success' divided by total calls where authentication was attempted.",
+      "aggregation": "Per arm, per risk_band."
+    },
+    {
+      "name": "authentication_failure_rate",
+      "description": "Proportion of authentication attempts that fail due to incorrect answers, failed voice verification, failed liveness, or timeouts.",
+      "unit": "ratio",
+      "collection_method": "Count of calls where authentication_result in ['failure','timeout'] divided by total calls where authentication was attempted.",
+      "aggregation": "Per arm, per failure_reason category."
+    },
+    {
+      "name": "call_dropoff_rate_during_auth",
+      "description": "Proportion of calls where the caller abandons the call during the authentication stage (before reaching requested service).",
+      "unit": "ratio",
+      "collection_method": "Calls with call_disposition == 'abandoned_during_auth' divided by total calls starting authentication.",
+      "aggregation": "Per arm."
+    },
+    {
+      "name": "avg_authentication_time",
+      "description": "Average time spent on authentication steps, from the start of the first auth-related prompt/question to the decision to allow/deny access.",
+      "unit": "seconds",
+      "collection_method": "Duration measured via system timestamps for auth_start_ts and auth_end_ts.",
+      "aggregation": "Mean and percentiles per arm, per risk_band."
+    },
+    {
+      "name": "avg_total_call_handle_time",
+      "description": "Average total call handle time, including IVR and agent talk time, from call answer to call end.",
+      "unit": "seconds",
+      "collection_method": "Contact center platform metrics per call_id.",
+      "aggregation": "Mean and distribution per arm."
+    },
+    {
+      "name": "speaker_verification_far",
+      "description": "False Acceptance Rate for speaker verification in the treatment arm, estimated from WL2_offline_replay_benchmark and optionally from labeled live incidents.",
+      "unit": "ratio",
+      "collection_method": "In offline benchmark, proportion of impostor trials where similarity_score >= threshold; in live, approximate via confirmed fraud calls that passed voice verification.",
+      "aggregation": "Per language, per device type."
+    },
+    {
+      "name": "speaker_verification_frr",
+      "description": "False Rejection Rate for speaker verification in the treatment arm.",
+      "unit": "ratio",
+      "collection_method": "In offline benchmark, proportion of genuine trials where similarity_score < threshold; in live, approximate via genuine customers (no fraud indicators) who fail verification but pass fallback KBA.",
+      "aggregation": "Per language, per demographic segment where available and legally permissible."
+    },
+    {
+      "name": "liveness_challenge_failure_rate",
+      "description": "Proportion of liveness challenges in the treatment arm that fail (ASR mismatch, timing anomaly, or user abandonment).",
+      "unit": "ratio",
+      "collection_method": "Count of challenges with liveness_result in ['fail_asr','fail_timing','timeout'] divided by total liveness challenges issued.",
+      "aggregation": "Per challenge_type, per language."
+    },
+    {
+      "name": "csrf_like_replay_detection_rate",
+      "description": "Detection rate for replayed or cloned voices in WL2 offline benchmark when passed through the full treatment pipeline.",
+      "unit": "ratio",
+      "collection_method": "In WL2, proportion of synthetic or replayed audio sessions correctly rejected by either speaker verification or liveness.",
+      "aggregation": "Per cloning_tool, per language."
+    },
+    {
+      "name": "customer_complaint_rate_about_auth",
+      "description": "Rate of customer complaints specifically mentioning authentication difficulty, privacy concerns, or confusion about voice verification.",
+      "unit": "complaints_per_10000_calls",
+      "collection_method": "Text-mined or manually labeled complaint tickets and post-call survey responses linked to call_id, filtered by auth-related topics.",
+      "aggregation": "Per arm, per week."
+    },
+    {
+      "name": "biometric_opt_out_rate",
+      "description": "Proportion of biometric-enrolled customers who revoke consent or request disabling voice verification during the experiment.",
+      "unit": "ratio",
+      "collection_method": "Count of accounts changing biometric_consent_status from true to false divided by total enrolled accounts exposed to treatment.",
+      "aggregation": "Per jurisdiction, per arm (treatment specifically, with baseline as control where exposure exists)."
+    },
+    {
+      "name": "system_error_rate",
+      "description": "Rate of technical errors in speaker verification or liveness services (e.g., timeouts, 5xx, model exceptions) per call in the treatment arm.",
+      "unit": "errors_per_1000_calls",
+      "collection_method": "Application logs and metric counters from the verification and liveness services.",
+      "aggregation": "Per deployment version, per week."
+    }
+  ],
+  "success_criteria": {
+    "primary": [
+      "The treatment arm achieves at least a 30% relative reduction in fraud_rate_per_10k_calls compared with the baseline arm, with 95% confidence, and no statistically significant increase in fraud_rate_per_10k_calls in any high-risk customer segment.",
+      "The avg_total_call_handle_time in the treatment arm does not increase by more than 10% relative to baseline for medium-risk calls, with 95% confidence.",
+      "The call_dropoff_rate_during_auth in the treatment arm does not exceed baseline by more than 5 percentage points for any major language or accessibility segment."
+    ],
+    "secondary": [
+      "speaker_verification_far in WL2_offline_replay_benchmark is <= 0.5% at an FRR <= 5% for the primary language and channel.",
+      "liveness_challenge_failure_rate for genuine callers is <= 10% in the treatment arm, with lower failure rates for customers using accessibility accommodations where measured.",
+      "customer_complaint_rate_about_auth in the treatment arm is not more than 20% higher than in the baseline arm and shows no disproportionate increase in protected or vulnerable segments (where measurement is lawful and ethical).",
+      "biometric_opt_out_rate remains below a predefined tolerable threshold (e.g., 3% over the experiment window), indicating acceptable customer comfort with the mechanism."
+    ],
+    "operational": [
+      "system_error_rate for verification and liveness services remains below 5 errors_per_1000_calls throughout the experiment.",
+      "No severe incidents (e.g., major fraud cluster) are attributed to failures unique to the treatment arm; if such incidents occur, the experiment must be paused and design revisited."
+    ]
+  },
+  "failure_modes": [
+    {
+      "name": "high_false_rejection_for_specific_segments",
+      "description": "Speaker verification or liveness has disproportionately high FRR for certain accents, languages, or accessibility needs, leading to discrimination and customer harm.",
+      "detection": "Monitor speaker_verification_frr and liveness_challenge_failure_rate by segment; investigate if FRR > 2x baseline KBA failure rate for any segment."
+    },
+    {
+      "name": "insufficient_fraud_reduction",
+      "description": "Despite added friction, the treatment arm does not materially reduce fraud_rate_per_10k_calls compared with baseline.",
+      "detection": "Interim and final statistical analyses show less than the targeted 30% relative reduction with overlapping confidence intervals or even higher fraud in treatment."
+    },
+    {
+      "name": "increased_social_engineering_via_agents",
+      "description": "Attackers circumvent voice verification by pressuring or manipulating agents to bypass or override failed verification results.",
+      "detection": "Audit logs show agents overriding failed voice verification at higher rates in treatment; fraud_events associated with such overrides increase."
+    },
+    {
+      "name": "regulatory_or_privacy_non_compliance",
+      "description": "Biometric data is processed for callers without valid consent or in prohibited jurisdictions.",
+      "detection": "Periodic audits show mismatches between consent records and treatment exposure; data protection office flags non-compliance."
+    },
+    {
+      "name": "technical_instability_and_latency_spikes",
+      "description": "Voice verification or liveness services introduce latency or errors that degrade customer experience beyond acceptable levels.",
+      "detection": "system_error_rate or avg_authentication_time exceeds predefined SLOs; monitoring alerts or agent feedback highlight systemic slowdowns."
+    },
+    {
+      "name": "adaptive_attacker_evasion",
+      "description": "Attackers adapt their strategies (e.g., high-quality real-time voice cloning, replay attacks with captured enrollment audio) to bypass verification and liveness, eroding benefits.",
+      "detection": "Forensically confirmed fraud cases with successful treatment flow outcomes and evidence of synthetic or replayed voices; increased CSRF_like_replay_detection_rate gap between offline and live performance."
+    },
+    {
+      "name": "customer_trust_erosion",
+      "description": "Customers interpret voice verification as intrusive or risky, leading to higher complaint and opt-out rates.",
+      "detection": "customer_complaint_rate_about_auth and biometric_opt_out_rate substantially exceed thresholds; surveys show declining satisfaction with authentication."
+    }
+  ],
+  "required_environment": {
+    "infrastructure": [
+      "Telephony/CCaaS platform capable of routing calls through configurable IVR flows and exposing audio streams to external services with low latency.",
+      "Application servers (e.g., Python/Node/Java-based) to host the speaker verification and liveness APIs, either in the enterprise environment or a controlled cloud environment.",
+      "Feature flag or experimentation platform capable of A/B routing and versioned configuration management.",
+      "Risk engine capable of providing risk scores and integrating new signals (speaker_verification_score, liveness_score) via API.",
+      "Secure storage for biometric templates (speaker embeddings) with encryption, access control, and auditable access logs.",
+      "Observability stack (e.g., Prometheus/Grafana, OpenTelemetry, ELK) for logging metrics, traces, and errors."
+    ],
+    "software_and_models": [
+      "Pre-trained speaker verification model(s) from public sources, such as SpeechBrain ECAPA-TDNN, x-vectors, or similar, along with documentation and licenses compatible with experimental use.",
+      "ASR engine for transcribing liveness challenge responses (cloud-based or on-prem).",
+      "Liveness scoring component (may initially be rule-based using ASR match and timing signals).",
+      "Repository checkout from https://github.com/bookauthority/securing-call containing reference code for embeddings extraction, scoring, and integration stubs (assumes such code will be provided)."
+    ],
+    "data_and_governance": [
+      "Curated dataset for WL2_offline_replay_benchmark, including labeled genuine and synthetic/replayed audio with associated metadata (language, device, session context).",
+      "Enrollment data and consent records for voice biometric-enabled customers.",
+      "Data protection impact assessment (DPIA/PIA) and legal sign-off for biometric use in all included jurisdictions.",
+      "Policies and procedures for consent, revocation, data retention, and incident response."
+    ],
+    "teams_and_roles": [
+      "ML/voice engineering team to integrate and tune speaker verification and liveness components.",
+      "Security and fraud team to define risk thresholds, monitor fraud metrics, and investigate incidents.",
+      "Contact center operations team to adjust scripts, train agents, and monitor customer feedback.",
+      "Privacy/legal team to oversee consent, regulatory compliance, and DPIA/PIA.",
+      "Analytics/experiment team to design the A/B test, perform statistical analysis, and interpret results."
+    ]
+  },
+  "run_instructions": [
+    "Design_and_Approval_Phase",
+    "1. Define the specific customer journeys where step-up voice verification and liveness will be introduced (e.g., account recovery, high-value transfers) and ensure alignment with Chapter 7.1 guidance on when to use voice verification.",
+    "2. Conduct or update a DPIA/PIA to cover use of voice biometrics and liveness, including cross-jurisdiction analysis, storage, consent, revocation, and purpose limitation in line with Chapter 7.8 and relevant policy chapters.",
+    "3. Obtain written approvals from security, fraud, privacy/legal, and contact center leadership for the experimental protocol, including success_criteria, failure_modes, and kill-switch conditions.",
+    "4. Define the segments (languages, risk bands, customer categories) to be included and any that must be excluded for regulatory or risk reasons.",
+    "Offline_Prototype_and_Threshold_Tuning",
+    "5. Implement the speaker verification prototype using public models (Chapter 7.3), following the companion repository\u2019s instructions for feature extraction and scoring.",
+    "6. Implement active liveness challenge generation and verification logic as described in Chapter 7.4, ensuring the challenge content is randomized and not trivially predictable or reusable.",
+    "7. Assemble WL2_offline_replay_benchmark from historical genuine calls and synthetic/replayed audio; annotate with ground truth labels and metadata.",
+    "8. Run WL2 through the speaker verification and liveness components separately and jointly, computing ROC curves, EER, FAR, FRR, and CSRF_like_replay_detection_rate.",
+    "9. Choose operating thresholds for speaker_verification_score and liveness_score to achieve target offline FAR/FRR trade-offs as described in the success_criteria. Document these thresholds and configuration versions.",
+    "10. Implement risk fusion between the risk engine output, speaker_verification_score, and liveness_score, and validate fusion behavior with synthetic test cases (e.g., low risk + high score, high risk + low score).",
+    "Instrumentation_and_Environment_Setup",
+    "11. Integrate the prototype speaker verification and liveness services with the telephony/CCaaS platform using reference architectural patterns from Chapter 7.2 and Chapter 8.",
+    "12. Implement the A/B routing logic (randomization function, stratification, and assignment to baseline or treatment). Ensure that callers lacking consent are automatically mapped to baseline flow and flagged as 'baseline_only'.",
+    "13. Implement detailed logging for each call, including arm assignment, consent status, auth steps performed, scores and thresholds, timings, and outcome fields as described in evidence_schema.",
+    "14. Configure monitoring dashboards and alerts for key online metrics: system_error_rate, avg_authentication_time, call_dropoff_rate_during_auth, and any spikes in complaints or fraud indicators.",
+    "15. Run end-to-end dry runs in a staging environment with test accounts, validating both baseline and treatment flows, including error handling and fallbacks.",
+    "Pilot_and_Ramp_Up",
+    "16. Start with a limited pilot (e.g., 5\u201310% of eligible traffic) in treatment while 90\u201395% remains in baseline, to validate real-world latency and UX, and to confirm that failure_modes are not triggered.",
+    "17. Monitor metrics daily during the pilot, focusing on system_error_rate, call_dropoff_rate_during_auth, customer_complaint_rate_about_auth, and any early fraud indicators.",
+    "18. If pilot metrics remain within acceptable ranges for a pre-defined period (e.g., 1\u20132 weeks), ramp up the treatment allocation to the planned 50/50 split, keeping stratification criteria constant.",
+    "Full_Experiment_Run",
+    "19. Run the full experiment for at least 4\u20136 weeks or until sufficient fraud_events accumulate to support the statistical power required for primary success_criteria.",
+    "20. During the run, avoid making unplanned model, threshold, or routing changes; if such changes are necessary, document them as configuration version increments and mark the corresponding time windows for separate analysis.",
+    "21. Continuously monitor fairness-related metrics (speaker_verification_frr and liveness_challenge_failure_rate by segment) and privacy/compliance controls (e.g., no treatment without consent). Escalate and consider pausing the experiment if severe disparities or compliance issues are detected.",
+    "22. Ensure that incident response procedures are followed for any suspected fraud clusters, including cross-checking whether treatment-specific failure_modes contributed.",
+    "Post_Experiment_Analysis",
+    "23. Compile all call-level and offline benchmark evidence according to the evidence_schema, ensuring de-identification or pseudonymization where required.",
+    "24. Compute primary and secondary metrics for each arm and segment; apply appropriate statistical tests (e.g., confidence intervals, hypothesis tests) to determine whether success_criteria are met.",
+    "25. Analyze trade-offs across security (fraud_events, fraud_rate_per_10k_calls) and friction (avg_authentication_time, call_dropoff_rate_during_auth, customer_complaint_rate_about_auth) per Chapter 7.5 and Chapter 12 guidance.",
+    "26. Investigate fairness and accessibility outcomes (Chapter 7.6): identify any segments where FRR or drop-off is unacceptably high and propose mitigations (e.g., alternative factors, adjusted thresholds, additional agent support).",
+    "27. Summarize integration lessons with IAM, risk engines, and fraud systems (Chapter 7.7), including any necessary schema or API changes discovered during the experiment.",
+    "28. Document biometric data handling practices, consent flows, and observed opt-out behavior for review with privacy/legal (Chapter 7.8).",
+    "Decision_and_Rollout",
+    "29. Present findings to cross-functional stakeholders, clearly explaining the observed benefit vs. friction trade-offs and any residual risks or limitations.",
+    "30. If success_criteria are met and no unacceptable failure_modes are observed, define a roadmap for expanding treatment to a larger customer population, possibly as the new default authentication step-up path.",
+    "31. If results are mixed or negative, identify which components (e.g., liveness design, thresholds, segment targeting) should be iterated and specify the next experimental cycle before any broad rollout.",
+    "32. Archive all experiment configurations, code versions, and evidence artifacts for auditability and future reference."
+  ],
+  "evidence_schema": {
+    "call_level_record": {
+      "type": "object",
+      "description": "One record per inbound call included in the experiment, capturing routing, authentication, scores, outcomes, and key metadata.",
+      "fields": {
+        "experiment_id": {
+          "type": "string",
+          "description": "Identifier of the experiment (e.g., 'exp-07-voice-verification-stepup-liveness-abtest')."
+        },
+        "call_id": {
+          "type": "string",
+          "description": "Unique identifier for the call within the contact center platform."
+        },
+        "account_id": {
+          "type": "string",
+          "description": "Pseudonymized account identifier, hashed or tokenized as per privacy policy."
+        },
+        "arm": {
+          "type": "string",
+          "enum": [
+            "baseline",
+            "treatment"
+          ],
+          "description": "The experimental arm to which this call was assigned."
+        },
+        "effective_arm": {
+          "type": "string",
+          "enum": [
+            "baseline",
+            "treatment",
+            "baseline_fallback"
+          ],
+          "description": "The arm that actually governed the authentication flow, considering fallbacks due to consent, errors, or policy."
+        },
+        "randomization_unit": {
+          "type": "string",
+          "description": "Identifier used for randomization (e.g., account_id)."
+        },
+        "risk_band": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "description": "Risk band at call start based on baseline risk engine thresholds."
+        },
+        "risk_score_baseline": {
+          "type": "number",
+          "description": "Risk score in [0, 1] from the baseline risk engine at call start."
+        },
+        "primary_language": {
+          "type": "string",
+          "description": "Language code (e.g., 'en', 'es') inferred or specified for the call."
+        },
+        "jurisdiction_code": {
+          "type": "string",
+          "description": "Code representing regulatory jurisdiction (e.g., 'US-CA', 'EU')."
+        },
+        "call_reason_category": {
+          "type": "string",
+          "description": "High-level classification of call purpose (e.g., 'billing', 'account_change', 'support')."
+        },
+        "device_type": {
+          "type": "string",
+          "description": "Type of calling endpoint where known (e.g., 'mobile', 'landline', 'voip')."
+        },
+        "biometric_enrollment_status": {
+          "type": "boolean",
+          "description": "Whether the account was enrolled in voice biometrics at call start."
+        },
+        "biometric_consent_status": {
+          "type": "boolean",
+          "description": "Whether valid biometric consent was recorded and active at call start."
+        },
+        "auth_flow_steps": {
+          "type": "array",
+          "description": "Ordered list of authentication steps performed during the call.",
+          "items": {
+            "type": "string",
+            "enum": [
+              "none",
+              "light_kba",
+              "standard_kba",
+              "enhanced_kba",
+              "otp",
+              "speaker_verification",
+              "liveness_challenge"
+            ]
+          }
+        },
+        "speaker_verification_invoked": {
+          "type": "boolean",
+          "description": "Whether speaker verification was attempted on this call."
+        },
+        "speaker_verification_score": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Normalized speaker verification similarity score in [0, 1], or null if not invoked."
+        },
+        "speaker_verification_threshold": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Decision threshold applied for speaker verification, or null if not invoked."
+        },
+        "speaker_verification_result": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "pass",
+            "fail",
+            "error",
+            "not_applicable",
+            null
+          ],
+          "description": "Outcome of speaker verification, if invoked."
+        },
+        "liveness_challenge_invoked": {
+          "type": "boolean",
+          "description": "Whether a liveness challenge was issued during the call."
+        },
+        "liveness_challenge_type": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Category of liveness challenge used (e.g., 'random_phrase_digits', 'phrase_with_substitution_change')."
+        },
+        "liveness_score": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Normalized liveness confidence score in [0, 1], or null if not invoked."
+        },
+        "liveness_threshold": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Decision threshold applied for liveness, or null if not invoked."
+        },
+        "liveness_result": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "pass",
+            "fail_asr",
+            "fail_timing",
+            "timeout",
+            "error",
+            "not_applicable",
+            null
+          ],
+          "description": "Outcome of the liveness challenge, if invoked."
+        },
+        "combined_auth_risk_score": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Combined risk score after fusing baseline risk, speaker verification, and liveness where applicable."
+        },
+        "auth_start_ts": {
+          "type": "string",
+          "description": "Timestamp when authentication started (ISO 8601)."
+        },
+        "auth_end_ts": {
+          "type": "string",
+          "description": "Timestamp when authentication ended (ISO 8601)."
+        },
+        "auth_result": {
+          "type": "string",
+          "enum": [
+            "success",
+            "failure",
+            "timeout",
+            "partial",
+            "skipped"
+          ],
+          "description": "Final outcome of the authentication process."
+        },
+        "auth_failure_reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Categorized reason for authentication failure or timeout where applicable (e.g., 'kba_incorrect', 'voice_verification_fail', 'liveness_fail', 'technical_error')."
+        },
+        "call_answer_ts": {
+          "type": "string",
+          "description": "Timestamp when call was answered (ISO 8601)."
+        },
+        "call_end_ts": {
+          "type": "string",
+          "description": "Timestamp when call ended (ISO 8601)."
+        },
+        "call_disposition": {
+          "type": "string",
+          "enum": [
+            "completed_service",
+            "abandoned_during_auth",
+            "abandoned_after_auth",
+            "routed_to_fraud_specialist",
+            "blocked_high_risk",
+            "other"
+          ],
+          "description": "Overall outcome of the call."
+        },
+        "fraud_label": {
+          "type": "string",
+          "enum": [
+            "unknown",
+            "no_fraud_identified",
+            "confirmed_fraud",
+            "suspected_fraud"
+          ],
+          "description": "Fraud outcome label assigned after investigations and post-call data become available."
+        },
+        "fraud_label_source": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Source of fraud labeling (e.g., 'chargeback', 'fraud_team_review', 'customer_report'), or null if not labeled."
+        },
+        "fraud_label_ts": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Timestamp when fraud label was assigned, if any (ISO 8601)."
+        },
+        "customer_feedback_code": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Code or label summarizing any auth-related customer feedback (e.g., from post-call survey)."
+        },
+        "auth_complaint_flag": {
+          "type": "boolean",
+          "description": "True if customer raised a complaint about authentication during or after the call."
+        },
+        "biometric_opt_out_flag": {
+          "type": "boolean",
+          "description": "True if the customer opted out of biometric authentication during or immediately after the call."
+        },
+        "system_error_flags": {
+          "type": "array",
+          "description": "List of technical error codes encountered during speaker verification or liveness processing.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "config_version": {
+          "type": "string",
+          "description": "Version identifier for the configuration (models, thresholds, routing rules) active for this call."
+        }
+      }
+    },
+    "offline_trial_record": {
+      "type": "object",
+      "description": "One record per trial in the WL2_offline_replay_benchmark dataset, capturing verification and liveness outcomes under controlled conditions.",
+      "fields": {
+        "experiment_id": {
+          "type": "string",
+          "description": "Identifier of the experiment."
+        },
+        "trial_id": {
+          "type": "string",
+          "description": "Unique identifier for the offline trial."
+        },
+        "dataset_id": {
+          "type": "string",
+          "description": "Identifier for the dataset or corpus from which this trial is drawn."
+        },
+        "trial_type": {
+          "type": "string",
+          "enum": [
+            "genuine",
+            "impostor",
+            "synthetic_clone",
+            "replay"
+          ],
+          "description": "Ground truth class of the trial."
+        },
+        "cloning_tool_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Identifier for the cloning or replay tool used for synthetic/replay trials, if applicable."
+        },
+        "speaker_id": {
+          "type": "string",
+          "description": "Pseudonymized identifier for the true speaker."
+        },
+        "enrolled_speaker_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Speaker ID of the target enrollment profile in impostor/synthetic/replay trials."
+        },
+        "primary_language": {
+          "type": "string",
+          "description": "Language code of the audio."
+        },
+        "device_type": {
+          "type": "string",
+          "description": "Simulated or recorded device type (e.g., 'mobile', 'landline', 'voip')."
+        },
+        "audio_duration_sec": {
+          "type": "number",
+          "description": "Duration of the audio sample used for verification."
+        },
+        "speaker_verification_score": {
+          "type": "number",
+          "description": "Similarity score from the speaker verification model."
+        },
+        "speaker_verification_threshold": {
+          "type": "number",
+          "description": "Threshold applied for pass/fail decision in this evaluation run."
+        },
+        "speaker_verification_result": {
+          "type": "string",
+          "enum": [
+            "pass",
+            "fail"
+          ],
+          "description": "Result of speaker verification for this trial."
+        },
+        "liveness_challenge_type": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Type of synthetic liveness challenge used, if any."
+        },
+        "liveness_score": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Liveness confidence score, if computed."
+        },
+        "liveness_threshold": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Threshold applied for liveness decision in this evaluation run."
+        },
+        "liveness_result": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "pass",
+            "fail_asr",
+            "fail_timing",
+            "timeout",
+            "not_applicable",
+            null
+          ],
+          "description": "Liveness outcome for this trial, if applicable."
+        },
+        "combined_auth_risk_score": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Combined score from simulated fusion logic, if applied."
+        },
+        "config_version": {
+          "type": "string",
+          "description": "Configuration version (model weights, thresholds, fusion parameters) used for this trial."
+        }
+      }
+    },
+    "aggregate_metrics_record": {
+      "type": "object",
+      "description": "Aggregated metrics for an arm and segment over a specified time window.",
+      "fields": {
+        "experiment_id": {
+          "type": "string"
+        },
+        "arm": {
+          "type": "string",
+          "enum": [
+            "baseline",
+            "treatment"
+          ]
+        },
+        "time_window_start": {
+          "type": "string",
+          "description": "ISO 8601 timestamp of aggregation window start."
+        },
+        "time_window_end": {
+          "type": "string",
+          "description": "ISO 8601 timestamp of aggregation window end."
+        },
+        "segment_definition": {
+          "type": "object",
+          "description": "Key-value pairs defining the segment (e.g., {\"risk_band\":\"high\",\"primary_language\":\"en\"})."
+        },
+        "metrics": {
+          "type": "object",
+          "description": "Computed metric values for this arm and segment.",
+          "properties": {
+            "fraud_events": {
+              "type": "number"
+            },
+            "fraud_rate_per_10k_calls": {
+              "type": "number"
+            },
+            "authentication_success_rate": {
+              "type": "number"
+            },
+            "authentication_failure_rate": {
+              "type": "number"
+            },
+            "call_dropoff_rate_during_auth": {
+              "type": "number"
+            },
+            "avg_authentication_time": {
+              "type": "number"
+            },
+            "avg_total_call_handle_time": {
+              "type": "number"
+            },
+            "speaker_verification_far": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "speaker_verification_frr": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "liveness_challenge_failure_rate": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "customer_complaint_rate_about_auth": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "biometric_opt_out_rate": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "system_error_rate": {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          }
+        },
+        "config_version": {
+          "type": "string",
+          "description": "Configuration version for the period; if multiple versions exist, this field may record 'mixed' with sub-breakdowns elsewhere."
+        }
+      }
+    }
+  }
+}

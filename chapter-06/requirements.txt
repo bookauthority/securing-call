@@ -1,0 +1,5 @@
+# Runtime requirements
+# --------------------
+# This project is designed to run using only the Python 3.11+ standard library.
+# No external runtime dependencies are required.
+

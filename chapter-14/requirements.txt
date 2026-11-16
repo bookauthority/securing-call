@@ -1,0 +1,2 @@
+# Runtime must use only the Python standard library.
+# This file is present for completeness but deliberately lists no external deps.

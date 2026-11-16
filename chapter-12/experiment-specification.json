@@ -1,0 +1,789 @@
+{
+  "experiment_id": "exp-voice-defense-kpi-ch12-rolling-ab-pilot",
+  "hypothesis": "Implementing a voice cloning defense stack with tuned thresholds and step-up verification, guided by real-time telemetry and KPI monitoring, will reduce successful voice-cloning-enabled fraud and high-risk impersonation events by at least 30% without increasing average handle time by more than 5% or materially degrading customer experience metrics, relative to the existing controls baseline.",
+  "baseline": {
+    "description": "Current production call-handling and fraud controls without specialized AI voice cloning defenses. Environment includes standard KBA (knowledge-based authentication), basic device/ANI checks, existing fraud rules, and generic QA/recording. No dedicated synthetic voice detection, no specialized liveness prompts beyond standard scripts, and limited security-focused telemetry (e.g., fraud chargebacks, manual case flags, and aggregate call metrics).",
+    "features": [
+      "No signal-level or model-based voice cloning detector in the call path.",
+      "Standard IVR and agent flows with existing KBA and one-time passwords where applicable.",
+      "Manual fraud case creation by agents or fraud ops teams in downstream case-management tools.",
+      "Existing contact center metrics (AHT, abandonment, NPS/CSAT, transfer rates) collected via CCaaS/CRM, but not linked at a per-call level to security outcomes.",
+      "Limited or no real-time risk scoring; fraud metrics are mostly lagging (e.g., confirmed losses, chargebacks)."
+    ],
+    "selection_criteria": "All eligible calls from predefined segments (e.g., retail banking inbound customer support for account and profile changes) that would normally be handled by the legacy control set during the experiment window and meet inclusion criteria (see workloads).",
+    "instrumentation_additions": [
+      "Non-invasive telemetry hooks to log per-call identifiers, channel, line of business, high-level outcome (resolved, escalated, abandoned), and fraud investigation linkage IDs.",
+      "Tagged outcomes for fraud review (e.g., case opened, confirmed fraud, false alarm) in downstream fraud systems to support ground-truth labeling post hoc.",
+      "Privacy- and compliance-reviewed pseudonymous call IDs to allow matching between contact center logs and fraud/case outcomes."
+    ]
+  },
+  "treatment": {
+    "description": "Enhanced call-handling and fraud control flow that incorporates a voice cloning detection service, adaptive risk scoring, and voice-based step-up verification for high-risk scenarios, with full telemetry capture feeding metrics dashboards. The treatment arm runs concurrently with the baseline under a controlled rollout (A/B or rolling pilot) using the same population definitions and business rules aside from the added defenses.",
+    "components": [
+      {
+        "name": "Voice Cloning Detection Service",
+        "description": "Real-time or near-real-time detector (built per Chapters 5\u20138) that scores incoming audio segments for likelihood of synthetic voice cloning.",
+        "inputs": [
+          "Audio stream or buffered segments from telephony/IVR.",
+          "Call metadata (ANI/CLID, IVR path, queue, language, device type where available)."
+        ],
+        "outputs": [
+          "Synthetic_voice_score in [0,1].",
+          "Detection_confidence band (low/medium/high).",
+          "Optional feature-level traces for offline analysis."
+        ]
+      },
+      {
+        "name": "Risk Orchestrator",
+        "description": "Policy engine that fuses detector scores with existing fraud/risk signals and decides whether to proceed normally, trigger step-up verification, or route to a specialist.",
+        "inputs": [
+          "Synthetic_voice_score and confidence.",
+          "Customer profile risk (e.g., VIP, high net worth, past fraud incidents).",
+          "Transaction intent (balance inquiry vs. high-value transfer).",
+          "Channel characteristics (call origin, time of day, geo anomalies)."
+        ],
+        "decisions": [
+          "Allow_with_standard_controls.",
+          "Trigger_step_up_verification (voice or non-voice-based).",
+          "Route_to_high-risk_queue_or_specialist.",
+          "Deny_or_suspend_action_pending_review."
+        ]
+      },
+      {
+        "name": "Step-Up Verification / Liveness Flow",
+        "description": "Configured per use cases from Chapter 7 to introduce additional verification challenges when risk is elevated, such as randomized phrases, callback flows, or out-of-band verification.",
+        "examples": [
+          "Dynamic passphrase repetition and content-matching.",
+          "Out-of-band approval via registered mobile app or email.",
+          "Agent scripts for high-risk impersonation cues with structured disposition logging."
+        ]
+      },
+      {
+        "name": "Telemetry and Metrics Pipeline",
+        "description": "Event-based telemetry that captures per-call detection scores, risk decisions, verification outcomes, and downstream business events into a metrics store and dashboard framework.",
+        "events_captured": [
+          "Detector inference events (input metadata, score, version, latency).",
+          "Risk decision events (policy ID, decision type, rationale/signal contributions).",
+          "Verification events (challenge types, passes/fails, fallback paths).",
+          "Operational outcomes (handle time, transfers, escalations, abandonment).",
+          "Fraud/case outcomes (investigation opened, confirmed fraud, false positive)."
+        ]
+      }
+    ],
+    "selection_criteria": "Calls from the same defined lines of business and risk segments as the baseline, meeting inclusion criteria, that are randomized or deterministically assigned (e.g., by customer ID modulo bucket) to the treatment arm. Customer and agent populations should be balanced across arms where possible.",
+    "guardrails": [
+      "Hard caps on step-up challenge frequency per customer per time window.",
+      "Maximum allowed increase in agent workflow steps before forcing fall-back to baseline flow for that call.",
+      "Fail-open or fail-safe policies defined for detector or orchestrator outages, with telemetry on these conditions."
+    ]
+  },
+  "workloads": [
+    {
+      "name": "WL1_retail_banking_inbound_auth_and_profile_change",
+      "description": "Inbound calls from retail banking customers performing authentication, profile changes (address, phone, email), or payment instrument updates. This workload is typically high risk for account takeover via voice cloning.",
+      "inclusion_criteria": [
+        "Line of business = Retail Banking.",
+        "Call type/category in CRM/IVR routing = Authentication, Profile Update, Security Question Reset, or Address/Contact Info Change.",
+        "Customer segments: All segments except those with specific legal or accessibility exemptions (e.g., regulatory constraints on voice biometrics in certain jurisdictions)."
+      ],
+      "exclusion_criteria": [
+        "Calls flagged as test, training, or internal QA.",
+        "Jurisdictions where synthetic voice detection or biometric-related processing is not yet legally cleared.",
+        "Known automated system-to-system calls (e.g., API-triggered notifications)."
+      ],
+      "traffic_split": {
+        "method": "Deterministic hash-based assignment",
+        "unit": "Customer ID (or equivalent stable identifier)",
+        "baseline_bucket": "hash(customer_id) % 2 == 0",
+        "treatment_bucket": "hash(customer_id) % 2 == 1",
+        "expected_distribution": "Approximately 50/50 across baseline and treatment over the experiment window."
+      }
+    },
+    {
+      "name": "WL2_high-value_transaction_support",
+      "description": "Calls involving high-dollar transactions, wire transfers, or large disbursements. Lower volume but higher fraud-loss exposure. May use a more conservative rollout pattern (e.g., pilot with 20% treatment).",
+      "inclusion_criteria": [
+        "Transaction intent or queue = Wire Transfer, Large Payment, Cashier\u2019s Check, or Similar High-Value Actions.",
+        "Transaction amount above pre-agreed threshold (e.g., local currency equivalent of USD 5,000) OR flagged as high risk by existing fraud engine."
+      ],
+      "exclusion_criteria": [
+        "Jurisdictions or product lines outside agreed regulatory scope.",
+        "VIP/concierge service segments where additional CX approvals are needed (may be handled via separate experiment)."
+      ],
+      "traffic_split": {
+        "method": "Stratified random sampling by risk tier",
+        "unit": "Call session ID",
+        "baseline_bucket": "80% of eligible calls (control-heavy for safety).",
+        "treatment_bucket": "20% of eligible calls, with option to gradually increase share as safety is demonstrated.",
+        "notes": "Maintain similar distribution of risk tiers across arms using existing fraud scores for stratification."
+      }
+    }
+  ],
+  "controls": {
+    "randomization": [
+      "Deterministic, data-driven assignment (e.g., hash of customer ID or anonymized token) to ensure that each returning customer consistently experiences the same arm during the experiment, avoiding contamination from mixed experiences.",
+      "Randomization logic implemented in IVR or routing layer prior to invocation of detection logic, logged for audit."
+    ],
+    "covariate_balance": [
+      "Pre-experiment analysis to confirm that baseline and treatment arms have comparable distributions of customer segments (age bands, tenure, product mix), historical fraud risk scores, and typical call reasons.",
+      "If imbalance is detected, adjust via stratified sampling or weighted analysis in the experiment evaluation."
+    ],
+    "seasonality_and_time_controls": [
+      "Run experiment for a minimum of 4\u20136 weeks to span typical intra-week patterns and avoid overly short-term anomalies.",
+      "Ensure both arms are live throughout the same time window; do not run baseline and treatment sequentially.",
+      "Track and annotate major events that may impact call volume or fraud patterns (e.g., marketing campaigns, holidays)."
+    ],
+    "policy_consistency": [
+      "Aside from voice defense capabilities and associated flows, all other agent scripts, offers, and core business policies remain identical across arms.",
+      "Training/briefing for agents conducted such that they understand both arms but do not selectively deviate from assigned flows."
+    ],
+    "privacy_and_compliance": [
+      "Legal review of telemetry fields and retention settings before experiment start.",
+      "Explicit approvals for any processing that may be interpreted as biometric under local law, with consent handling aligned as per Chapter 9.",
+      "Anonymization or pseudonymization of call identifiers in the analytics data store, with separate mapping held under stricter access controls."
+    ],
+    "operational_safety": [
+      "Real-time monitoring of key leading safety indicators (e.g., sudden spike in denial of legitimate high-risk transactions, unusual abandonment in treatment) with pre-defined rollback thresholds.",
+      "Ability to disable detector enforcement (reverting to baseline) via configuration toggle while continuing to log telemetry where permissible for diagnostic purposes."
+    ]
+  },
+  "metrics": [
+    {
+      "name": "successful_voice_cloning_enabled_fraud_rate",
+      "definition": "Number of confirmed fraud cases in which investigators attribute a significant role to suspected or confirmed AI voice cloning divided by total eligible calls for that workload and arm, over the experiment window.",
+      "unit": "fraud_cases_per_10k_calls",
+      "type": "primary_outcome",
+      "source": "Fraud/case management system joined with call logs and investigator annotations (manual classification of whether synthetic voice was involved).",
+      "notes": "Given attribution difficulty, use structured investigator fields (e.g., 'voice cloning suspected: yes/no/unknown') and sensitivity analysis that treats 'unknown' separately."
+    },
+    {
+      "name": "gross_fraud_loss_rate",
+      "definition": "Total confirmed fraud financial losses associated with the eligible workload and arm divided by total monetary value of authorized high-risk transactions during the experiment window.",
+      "unit": "basis_points (0.01% of transaction value)",
+      "type": "primary_outcome",
+      "source": "Core banking/payments systems combined with fraud resolution outcomes and call linkage."
+    },
+    {
+      "name": "detected_suspicious_call_rate",
+      "definition": "Number of calls where the synthetic_voice_score exceeds the configured high-risk threshold or where the risk orchestrator flags the call as 'elevated risk' due at least in part to voice analysis, divided by total eligible calls.",
+      "unit": "suspicious_calls_per_1k_calls",
+      "type": "intermediate_security_metric",
+      "source": "Detection and risk-orchestrator telemetry events."
+    },
+    {
+      "name": "step_up_verification_trigger_rate",
+      "definition": "Number of calls in which any step-up verification flow is triggered (voice or non-voice) divided by total eligible calls in that arm.",
+      "unit": "triggers_per_1k_calls",
+      "type": "intermediate_process_metric",
+      "source": "Verification event logs and IVR/agent workflows."
+    },
+    {
+      "name": "step_up_verification_failure_rate",
+      "definition": "Number of calls in which step-up verification is triggered and the customer fails or abandons the verification (excluding technical failures), divided by total step-up attempts.",
+      "unit": "percent",
+      "type": "security_and_cx_tradeoff_metric",
+      "source": "Verification flow telemetry and call outcomes."
+    },
+    {
+      "name": "false_positive_flag_rate",
+      "definition": "Among calls later adjudicated as legitimate (no fraud) and where investigators or QA agents review the interaction, proportion of calls that were flagged as suspicious by detection/orchestration.",
+      "unit": "percent_of_reviewed_legitimate_calls",
+      "type": "error_rate_metric",
+      "source": "Join between detector flags and human-reviewed labels for a statistically representative subsample of calls."
+    },
+    {
+      "name": "false_negative_estimate_rate",
+      "definition": "Among confirmed fraudulent calls in the workload and arm, proportion with no high-risk flag from the detector/orchestrator at the time of call.",
+      "unit": "percent_of_confirmed_fraud_calls",
+      "type": "error_rate_metric",
+      "source": "Join between confirmed fraud cases and detection logs; may be a lower bound given imperfect labeling."
+    },
+    {
+      "name": "average_handle_time",
+      "definition": "Average duration of eligible calls from agent answer to end-of-call for that arm and workload.",
+      "unit": "seconds",
+      "type": "operational_metric",
+      "source": "Contact center platform/CCaaS telemetry."
+    },
+    {
+      "name": "customer_experience_score",
+      "definition": "Post-call customer satisfaction or NPS-like score collected via IVR, SMS, or email survey, aggregated for eligible calls by arm.",
+      "unit": "score_on_standardized_scale (e.g., 1\u20135 CSAT or -100\u2013100 NPS)",
+      "type": "cx_metric",
+      "source": "Survey platform joined to call IDs."
+    },
+    {
+      "name": "call_abandonment_rate",
+      "definition": "Proportion of eligible calls in which the caller hangs up before resolving their request, especially during or shortly after step-up verification prompts.",
+      "unit": "percent_of_eligible_calls",
+      "type": "cx_and_operational_metric",
+      "source": "IVR and CCaaS call state logs, annotated by phase of call when abandonment occurred."
+    },
+    {
+      "name": "agent_escalation_rate",
+      "definition": "Rate at which agents escalate calls to supervisors or fraud specialists due to suspected impersonation or confusion related to step-up verification.",
+      "unit": "escalations_per_1k_calls",
+      "type": "operational_metric",
+      "source": "Agent desktop disposition codes, supervisor queue entries."
+    },
+    {
+      "name": "detector_inference_latency",
+      "definition": "End-to-end latency from audio frame availability to receipt of detection score at the orchestrator.",
+      "unit": "milliseconds (ms) at p50, p90, p99",
+      "type": "technical_performance_metric",
+      "source": "Telemetry emitted by detection service and orchestrator (traces)."
+    },
+    {
+      "name": "human_review_workload",
+      "definition": "Total human time spent per unit period on reviewing flagged calls (QA, fraud analysts, supervisors), normalized by number of eligible calls.",
+      "unit": "review_minutes_per_1k_calls",
+      "type": "workload_metric",
+      "source": "Case management tools, QA platforms, and time-tracking tags for review tasks."
+    }
+  ],
+  "success_criteria": {
+    "primary": [
+      "A relative reduction of at least 30% in successful_voice_cloning_enabled_fraud_rate in the treatment arm compared to the baseline arm for WL1 (retail inbound auth/profile change) over the experiment window, with statistical significance at p <= 0.05 or credible interval excluding zero under agreed statistical framework.",
+      "No more than a 5% relative increase in average_handle_time in the treatment arm vs baseline for WL1, with confidence intervals bounded within this threshold.",
+      "No statistically significant degradation (or at most a 5% relative decrease) in customer_experience_score for WL1 between treatment and baseline, after controlling for confounders such as call reason and customer segment."
+    ],
+    "secondary": [
+      "A statistically significant decrease in gross_fraud_loss_rate in treatment vs baseline for WL2 (high-value transactions), even if the absolute number of cases is low, supported by effect-size estimates and scenario-based extrapolation.",
+      "Step_up_verification_failure_rate remains below an agreed threshold (e.g., 10\u201315% depending on use case) and is not materially higher in low-risk segments than in high-risk segments.",
+      "False_positive_flag_rate in treatment remains within an acceptable band defined by fraud and operations leadership (e.g., <= 2\u20133% of reviewed legitimate calls), or reductions in fraud losses justify higher false positive levels as per pre-defined cost-benefit thresholds.",
+      "Human_review_workload increase is bounded by available operational capacity (e.g., not more than +20% review minutes per 1k calls) or justified by proportional fraud loss reductions."
+    ],
+    "decision_rules": [
+      "If primary fraud reduction and CX/operational bounds are met: recommend progressive scale-up of treatment to a larger share of traffic and/or additional workloads.",
+      "If fraud reduction is material but CX/operational impact exceeds thresholds: iterate on threshold tuning, flow design, and targeted risk segments; run follow-up experiment with adjusted parameters.",
+      "If fraud reduction is non-material or negative: halt scale-up, revert to baseline flows, and use telemetry to diagnose failure modes (e.g., detector underperformance, adversarial adaptation)."
+    ]
+  },
+  "failure_modes": [
+    {
+      "name": "adversarial_adaptation",
+      "description": "Attackers change tactics in response to deployment, for example by using more advanced voice cloning tools, mixing natural and synthetic voice segments, or shifting to non-voice channels.",
+      "indicators": [
+        "Rising false_negative_estimate_rate over time within the treatment arm.",
+        "Significant change in distribution of synthetic_voice_score among confirmed fraud calls.",
+        "Shifts in channel or intent distribution for fraud cases (e.g., more fraud in web or chat)."
+      ],
+      "mitigations": [
+        "Introduce continuous adversarial evaluation per Chapter 14 and adapt detector ensembles.",
+        "Revisit thresholds and incorporate additional behavioral or metadata signals.",
+        "Update fraud strategy to treat cross-channel displacement as part of the impact model."
+      ]
+    },
+    {
+      "name": "agent_behavior_drift",
+      "description": "Agents may over-rely on, underuse, or misinterpret detection and risk signals, leading to inconsistent application of policies and contamination of results.",
+      "indicators": [
+        "High variance in step_up_verification_trigger_rate across agents controlling for risk score.",
+        "Qualitative feedback indicating confusion about what detector or risk scores mean.",
+        "Unusually high manual overrides of orchestrator decisions."
+      ],
+      "mitigations": [
+        "Standardize agent guidance and scripts; add just-in-time help text in agent desktop.",
+        "Instrument and track manual override events; add governance review for outliers.",
+        "Shadow QA review of a random sample of treatment-arm calls to ensure protocol adherence."
+      ]
+    },
+    {
+      "name": "telemetry_gaps_or_data_quality_issues",
+      "description": "Incomplete or inconsistent telemetry prevents accurate measurement of fraud, CX, or operational metrics.",
+      "indicators": [
+        "Significant fraction of calls missing event linkage across systems (no common call ID).",
+        "Unexplained discrepancies between contact center metrics and fraud system counts.",
+        "Detector logs missing for periods of time or subsets of traffic."
+      ],
+      "mitigations": [
+        "Implement data completeness checks and alerts in the telemetry pipeline.",
+        "Run periodic reconciliation reports across systems; halt interpretation of metrics when gaps exceed defined thresholds.",
+        "Use canary traffic (known test calls) to validate end-to-end logging paths regularly."
+      ]
+    },
+    {
+      "name": "privacy_or_regulatory_noncompliance",
+      "description": "Aggregation and use of telemetry or detection signals may inadvertently violate data protection, biometric, or consent requirements.",
+      "indicators": [
+        "Legal or privacy review flags on telemetry fields or retention practices.",
+        "Customer complaints or regulatory inquiries referencing synthetic voice or biometric processing.",
+        "Discovery that calls from restricted jurisdictions or segments were included unintentionally."
+      ],
+      "mitigations": [
+        "Pre-experiment privacy impact assessments and regulatory review with explicit scope definitions.",
+        "Geofencing and segment-based routing to ensure only allowed calls are included.",
+        "Strict access controls, minimization, and retention policies for telemetry data."
+      ]
+    },
+    {
+      "name": "capacity_and_workload_overload",
+      "description": "Increased step-up verification and human review of suspicious calls overload agents, supervisors, or fraud teams.",
+      "indicators": [
+        "Human_review_workload significantly exceeds pre-defined capacity thresholds.",
+        "Rising agent_escalation_rate without clear fraud justification.",
+        "Agent-reported burnout or performance degradation in treatment queues."
+      ],
+      "mitigations": [
+        "Introduce caps on daily step-up triggers and flagged calls per queue.",
+        "Prioritize high-value or high-risk segments for full treatment; leave low-risk segments at baseline.",
+        "Iterate on detector thresholds to reduce low-yield alerts."
+      ]
+    },
+    {
+      "name": "technical_instability_or_latency_impact",
+      "description": "Detector or telemetry services fail, degrade, or introduce latency that harms customer experience.",
+      "indicators": [
+        "Spikes in detector_inference_latency, especially at p95/p99.",
+        "Increased call drop or abandonment rates during or immediately after detection phases.",
+        "Higher than expected rates of fail-open/override events due to service unavailability."
+      ],
+      "mitigations": [
+        "Autoscaling, circuit breakers, and fallback strategies defined and tested before rollout.",
+        "Latency monitoring with paging thresholds and clear incident response runbooks.",
+        "Staged rollout with performance testing at expected and peak traffic levels."
+      ]
+    }
+  ],
+  "required_environment": {
+    "infrastructure": [
+      "Production-like contact center and telephony environment (CCaaS platform, IVR, agent desktops) capable of routing traffic based on experiment arm assignment.",
+      "Voice cloning detection service deployed as a scalable microservice or managed function, with secure network connectivity to telephony/IVR stack.",
+      "Risk orchestration layer (may be an existing policy engine or new microservice) capable of consuming detection scores and emitting decisions in near-real-time.",
+      "Telemetry pipeline (e.g., event bus such as Kafka or Kinesis; or CCaaS-native streaming) forwarding structured events to a data warehouse (e.g., BigQuery, Snowflake, Redshift) or time-series store (e.g., Prometheus, Elasticsearch).",
+      "Dashboarding and analytics tools (e.g., Looker, Power BI, Tableau, or Grafana) connected to the telemetry store."
+    ],
+    "data_requirements": [
+      "Access to pseudonymized call logs and associated metadata (timestamps, call IDs, queues, agent IDs).",
+      "Access to downstream fraud and case management systems for labeling confirmed fraud and suspected voice cloning involvement.",
+      "Customer experience survey data linked via call IDs, with opt-in rates tracked.",
+      "Compliance-approved schema for storing detection scores and verification events."
+    ],
+    "security_and_access": [
+      "Role-based access control for experiment artifacts and dashboards, segregating production PII from analytics environments.",
+      "Audit logging for configuration changes to detectors, orchestrator rules, and routing logic.",
+      "Secure secrets management for any model or vendor keys (e.g., if third-party detection APIs are used)."
+    ],
+    "organizational": [
+      "Cross-functional experiment working group including representatives from fraud/risk, contact center operations, security architecture, data science/ML, compliance/privacy, and legal.",
+      "Defined on-call or escalation paths for experiment-related operational incidents.",
+      "Training material and briefings for agents on new flows and how to interpret risk signals where exposed."
+    ],
+    "reference_repository_integration": [
+      "Cloned or forked version of the companion repository (https://github.com/bookauthority/securing-call) with the Chapter 12 / experiments folder checked out.",
+      "Configuration files in the repo mapped to the organization\u2019s specific CCaaS, messaging, and data warehouse endpoints.",
+      "CI/CD or deployment scripts to roll out configuration updates and detector version changes in a controlled manner."
+    ]
+  },
+  "run_instructions": [
+    "Design_and_Approval",
+    "1. Define target workloads (e.g., WL1, WL2) and document inclusion/exclusion criteria with fraud and operations stakeholders.",
+    "2. Conduct a privacy and legal review of the planned telemetry fields, thresholds, and step-up verification flows; update consent/disclosure scripts as needed.",
+    "3. Draft and agree on experiment parameters: traffic split percentages, duration (minimum 4\u20136 weeks), participating regions, and success/failure thresholds.",
+    "4. Establish experiment governance: assign an experiment owner, data analyst, operational liaison, and legal/privacy point of contact.",
+    "",
+    "Instrumentation_and_Telemetry_Setup",
+    "5. Implement or configure a pseudonymous call ID that persists through IVR, CCaaS, agent desktop, and case/fraud systems; update logging configurations accordingly.",
+    "6. Deploy or enable the telemetry pipeline from the CCaaS/IVR to the data warehouse/time-series store, following the schemas defined in the evidence_schema (e.g., detection_event, risk_decision_event).",
+    "7. Integrate fraud/case management system exports with call IDs or mapping tables; schedule regular ETL jobs into the analytics environment.",
+    "8. Configure survey tools to tag post-call CX responses with the same call IDs or a joinable key; test end-to-end joins in a staging environment.",
+    "",
+    "Baseline_and_Treatment_Flow_Implementation",
+    "9. Implement the voice cloning detection service as defined in Chapters 5\u20138 (or integrate an external API), instrumenting it with per-call inference events and latency metrics.",
+    "10. Implement the risk orchestration rules for the treatment arm, including thresholds for synthetic_voice_score, integration with existing risk scores, and definition of step-up flow triggers.",
+    "11. Define at least one voice or non-voice step-up verification flow (e.g., dynamic passphrase, out-of-band approval) and implement it in the IVR and/or agent scripts, with structured outcome logging.",
+    "12. For the baseline arm, ensure that no new detection-triggered step-up flows are used; only the existing standard flows should apply, though telemetry instrumentation should still log relevant outcomes.",
+    "",
+    "Randomization_and_Routing",
+    "13. Implement deterministic assignment logic in the IVR or routing layer (e.g., hash(customer_id) % 2) to assign each eligible call to baseline or treatment.",
+    "14. Log the assigned arm (baseline/treatment) in all downstream systems via the shared call ID.",
+    "15. Validate assignment balance by running a short dry-run period (e.g., 1\u20132 days) where no treatment-specific logic is activated but routing and logging are fully operational; inspect arm distributions.",
+    "",
+    "Pilot_and_Safety_Checks",
+    "16. Start with a limited pilot (e.g., 10\u201320% of eligible traffic into treatment) for WL1 and WL2, with real-time monitoring of detector_inference_latency, call_abandonment_rate, and any unexpected call routing issues.",
+    "17. If safety indicators remain within pre-agreed bounds after a short pilot window (e.g., 3\u20135 business days), ramp the treatment arm to the full intended share (e.g., 50% for WL1, 20% for WL2).",
+    "",
+    "Experiment_Run",
+    "18. Run the experiment for the agreed period, ensuring both arms are always active during the same calendar windows.",
+    "19. Monitor leading indicators daily or weekly (technical stability, CX, and operational load), and only inspect fraud outcomes at pre-defined intervals to avoid premature stopping biases.",
+    "20. Maintain a change log; avoid making mid-experiment changes to thresholds, flows, or randomization logic unless necessary for safety. Any changes must be time-stamped and annotated for later analysis.",
+    "",
+    "Analysis",
+    "21. After the experiment window, freeze configuration and extract event tables (e.g., calls, detection_events, risk_decision_events, verification_events, fraud_outcomes, cx_surveys) from the data warehouse.",
+    "22. Use the analysis notebooks or scripts in the repository\u2019s Chapter 12 folder to:",
+    "    a. Join events into per-call records and compute defined metrics for each arm and workload.",
+    "    b. Assess randomization balance across arms on key covariates.",
+    "    c. Estimate relative and absolute differences in primary and secondary metrics between arms, with confidence intervals or Bayesian credible intervals.",
+    "23. Perform subgroup analyses by customer segment, risk level, and geography to identify heterogeneous treatment effects and potential fairness or bias concerns.",
+    "",
+    "Interpretation_and_Decision",
+    "24. Compare experimental results against the predefined success_criteria and decision_rules, explicitly noting any tradeoffs between fraud reduction, CX, and operational load.",
+    "25. Document interpreted findings, including limitations (e.g., limited fraud event counts, attribution ambiguity, suspected adversarial adaptation).",
+    "26. Present results and recommendations to the cross-functional steering group (fraud, CX, security, compliance, legal) and agree on next steps: scale-up, iterate and re-run, or rollback.",
+    "",
+    "Hardening_and_Rollout",
+    "27. If the treatment is adopted, transition from experiment mode to standard operations, including updated playbooks, SLAs for detector performance, and integration of metrics into ongoing monitoring dashboards.",
+    "28. Archive experiment configurations, code versions, and metrics snapshots for auditability and future benchmarking against subsequent experiments.",
+    "29. Update the enterprise measurement framework and dashboards to incorporate the most informative metrics discovered during the experiment and to support continuous monitoring of adaptive threats."
+  ],
+  "evidence_schema": {
+    "tables": [
+      {
+        "name": "calls",
+        "primary_key": "call_id",
+        "description": "One record per eligible call included in the experiment, with assignment, workload, and basic call context.",
+        "fields": [
+          {
+            "name": "call_id",
+            "type": "string",
+            "description": "Pseudonymous unique identifier for the call, consistent across systems."
+          },
+          {
+            "name": "customer_id_hash",
+            "type": "string",
+            "description": "Hashed or tokenized customer identifier used for randomization; not directly identifying."
+          },
+          {
+            "name": "experiment_arm",
+            "type": "string",
+            "allowed_values": [
+              "baseline",
+              "treatment"
+            ],
+            "description": "Randomization assignment for the call."
+          },
+          {
+            "name": "workload_id",
+            "type": "string",
+            "allowed_values": [
+              "WL1_retail_banking_inbound_auth_and_profile_change",
+              "WL2_high_value_transaction_support"
+            ],
+            "description": "Workload classification for the call."
+          },
+          {
+            "name": "timestamp_start",
+            "type": "datetime",
+            "description": "Call start time."
+          },
+          {
+            "name": "timestamp_end",
+            "type": "datetime",
+            "description": "Call end time."
+          },
+          {
+            "name": "queue_or_skill",
+            "type": "string",
+            "description": "Queue or skill-based routing identifier."
+          },
+          {
+            "name": "agent_id_hash",
+            "type": "string",
+            "description": "Hashed agent identifier for aggregate analysis."
+          },
+          {
+            "name": "call_outcome",
+            "type": "string",
+            "allowed_values": [
+              "resolved",
+              "escalated",
+              "abandoned",
+              "transferred",
+              "other"
+            ],
+            "description": "High-level call outcome from CCaaS/CRM."
+          },
+          {
+            "name": "average_handle_time_sec",
+            "type": "number",
+            "description": "Handle time in seconds for the call."
+          }
+        ]
+      },
+      {
+        "name": "detection_events",
+        "primary_key": "detection_event_id",
+        "description": "One record per detection inference for a call; some calls may have multiple events if streaming segments are scored.",
+        "fields": [
+          {
+            "name": "detection_event_id",
+            "type": "string",
+            "description": "Unique identifier for the detection event."
+          },
+          {
+            "name": "call_id",
+            "type": "string",
+            "description": "Foreign key to calls.call_id."
+          },
+          {
+            "name": "model_version",
+            "type": "string",
+            "description": "Version or hash of the detection model used."
+          },
+          {
+            "name": "synthetic_voice_score",
+            "type": "number",
+            "description": "Score in [0,1] representing likelihood of synthetic voice."
+          },
+          {
+            "name": "risk_band",
+            "type": "string",
+            "allowed_values": [
+              "low",
+              "medium",
+              "high"
+            ],
+            "description": "Binned risk assessment from the detector or orchestration."
+          },
+          {
+            "name": "latency_ms",
+            "type": "number",
+            "description": "Detection inference latency in milliseconds."
+          },
+          {
+            "name": "timestamp",
+            "type": "datetime",
+            "description": "Time when detection event occurred."
+          }
+        ]
+      },
+      {
+        "name": "risk_decision_events",
+        "primary_key": "risk_decision_event_id",
+        "description": "Decisions from the risk orchestration layer for each call.",
+        "fields": [
+          {
+            "name": "risk_decision_event_id",
+            "type": "string",
+            "description": "Unique identifier for the decision event."
+          },
+          {
+            "name": "call_id",
+            "type": "string",
+            "description": "Foreign key to calls.call_id."
+          },
+          {
+            "name": "decision",
+            "type": "string",
+            "allowed_values": [
+              "allow_with_standard_controls",
+              "trigger_step_up_verification",
+              "route_to_high_risk_queue",
+              "deny_or_suspend"
+            ],
+            "description": "Risk-based decision applied to the call."
+          },
+          {
+            "name": "decision_reason_codes",
+            "type": "array<string>",
+            "description": "List of codes indicating which signals contributed (e.g., DETECTOR_HIGH_SCORE, HIGH_VALUE_TRANSACTION)."
+          },
+          {
+            "name": "timestamp",
+            "type": "datetime",
+            "description": "Time the decision was made."
+          }
+        ]
+      },
+      {
+        "name": "verification_events",
+        "primary_key": "verification_event_id",
+        "description": "Records of step-up verification attempts and outcomes during calls.",
+        "fields": [
+          {
+            "name": "verification_event_id",
+            "type": "string",
+            "description": "Unique identifier for the verification event."
+          },
+          {
+            "name": "call_id",
+            "type": "string",
+            "description": "Foreign key to calls.call_id."
+          },
+          {
+            "name": "verification_type",
+            "type": "string",
+            "allowed_values": [
+              "voice_dynamic_phrase",
+              "out_of_band_app",
+              "sms_otp",
+              "agent_manual_probing",
+              "other"
+            ],
+            "description": "Type of step-up verification performed."
+          },
+          {
+            "name": "outcome",
+            "type": "string",
+            "allowed_values": [
+              "pass",
+              "fail",
+              "abandon",
+              "technical_failure"
+            ],
+            "description": "Outcome of the verification attempt."
+          },
+          {
+            "name": "timestamp_start",
+            "type": "datetime",
+            "description": "Verification start time."
+          },
+          {
+            "name": "timestamp_end",
+            "type": "datetime",
+            "description": "Verification end time."
+          }
+        ]
+      },
+      {
+        "name": "fraud_outcomes",
+        "primary_key": "fraud_case_id",
+        "description": "Confirmed fraud and investigation outcomes linked back to calls.",
+        "fields": [
+          {
+            "name": "fraud_case_id",
+            "type": "string",
+            "description": "Identifier for the fraud or investigation case."
+          },
+          {
+            "name": "call_id",
+            "type": "string",
+            "description": "Foreign key to calls.call_id; may be null if fraud not linked to a call."
+          },
+          {
+            "name": "fraud_confirmed",
+            "type": "boolean",
+            "description": "Whether fraud was confirmed after investigation."
+          },
+          {
+            "name": "fraud_loss_amount",
+            "type": "number",
+            "description": "Monetary loss associated with the case, in base currency."
+          },
+          {
+            "name": "suspected_voice_cloning_involved",
+            "type": "string",
+            "allowed_values": [
+              "yes",
+              "no",
+              "unknown"
+            ],
+            "description": "Investigator assessment of whether voice cloning was involved."
+          },
+          {
+            "name": "case_close_timestamp",
+            "type": "datetime",
+            "description": "Time when the investigation was completed."
+          }
+        ]
+      },
+      {
+        "name": "cx_surveys",
+        "primary_key": "survey_response_id",
+        "description": "Post-call customer experience survey responses.",
+        "fields": [
+          {
+            "name": "survey_response_id",
+            "type": "string",
+            "description": "Unique identifier for the survey response."
+          },
+          {
+            "name": "call_id",
+            "type": "string",
+            "description": "Foreign key to calls.call_id."
+          },
+          {
+            "name": "survey_type",
+            "type": "string",
+            "allowed_values": [
+              "CSAT",
+              "NPS",
+              "custom"
+            ],
+            "description": "Type of survey instrument."
+          },
+          {
+            "name": "score",
+            "type": "number",
+            "description": "Numerical score (e.g., 1\u20135 or -100\u2013100), to be normalized in analysis."
+          },
+          {
+            "name": "timestamp",
+            "type": "datetime",
+            "description": "Time when the survey response was recorded."
+          }
+        ]
+      },
+      {
+        "name": "human_review_sessions",
+        "primary_key": "review_session_id",
+        "description": "Records of human review of calls (QA, fraud analysts, supervisors) for workload tracking.",
+        "fields": [
+          {
+            "name": "review_session_id",
+            "type": "string",
+            "description": "Identifier for the review session."
+          },
+          {
+            "name": "call_id",
+            "type": "string",
+            "description": "Foreign key to calls.call_id."
+          },
+          {
+            "name": "reviewer_role",
+            "type": "string",
+            "allowed_values": [
+              "qa",
+              "fraud_analyst",
+              "supervisor",
+              "other"
+            ],
+            "description": "Role of the person performing the review."
+          },
+          {
+            "name": "review_duration_minutes",
+            "type": "number",
+            "description": "Approximate active time spent reviewing the call."
+          },
+          {
+            "name": "label_legitimacy",
+            "type": "string",
+            "allowed_values": [
+              "legitimate",
+              "fraud_suspected",
+              "fraud_confirmed",
+              "uncertain"
+            ],
+            "description": "Reviewer assessment of call legitimacy."
+          },
+          {
+            "name": "label_voice_cloning_suspected",
+            "type": "string",
+            "allowed_values": [
+              "yes",
+              "no",
+              "unknown"
+            ],
+            "description": "Reviewer assessment of whether voice cloning appears to be present."
+          },
+          {
+            "name": "timestamp",
+            "type": "datetime",
+            "description": "Timestamp of the review."
+          }
+        ]
+      }
+    ],
+    "versioning": {
+      "schema_version": "1.0.0",
+      "change_control": "All changes to schema must be documented with date, rationale, and impact on comparability to previous experiments."
+    },
+    "privacy": {
+      "pseudonymization_requirements": [
+        "All direct identifiers (names, raw phone numbers, account numbers, email addresses) must be removed or hashed before data enters experiment analytics tables.",
+        "Mapping tables from hashed IDs to real identifiers must be stored in a separate, access-restricted system and not used for routine experiment analysis."
+      ],
+      "data_retention": "Define a maximum retention period (e.g., 12\u201324 months) for experiment tables, after which data must be purged or irreversibly anonymized, subject to legal hold requirements."
+    }
+  }
+}

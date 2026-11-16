@@ -1,0 +1,728 @@
+{
+  "experiment_id": "exp-08-realtime-telephony-ivr-agent-desktop-v1",
+  "hypothesis": "A streaming, chunk-based integration of the voice cloning detection and verification pipeline with telephony/CCaaS platforms can provide actionable risk scores and agent UX signals within 500 ms p95 end-to-end latency per audio chunk, at 1,000 concurrent calls on commodity cloud infrastructure, without materially degrading call audio quality or platform stability.",
+  "baseline": {
+    "description": "Non-real-time, batch-style detection pipeline that processes full call recordings after call completion. No live agent alerts or IVR routing decisions are influenced by synthetic voice risk signals.",
+    "architecture": {
+      "audio_ingest": "Telephony/CCaaS platform (e.g., Twilio, Amazon Connect, Genesys Cloud) records full calls to object storage (e.g., Amazon S3, GCS) after call completion.",
+      "processing_model": "A scheduled batch job (e.g., hourly) reads completed call recordings, runs the synthetic vs natural voice detector and optional speaker verification, and writes risk scores to a data store (e.g., Postgres, BigQuery).",
+      "decision_latency": "Detection decisions available 5\u201360 minutes after call end, depending on batch schedule and job runtime.",
+      "agent_experience": "Agents receive no real-time indication of suspected synthetic voice. Risk scores may later appear in QA tools or fraud investigation dashboards but do not influence the live call.",
+      "ivr_behavior": "IVR flows do not use detection/verification signals. All calls follow pre-existing routing and authentication logic."
+    },
+    "capabilities": {
+      "risk_signal_timing": "Post-call only",
+      "granularity": "Call-level detection/verification result per completed call recording",
+      "integration_touchpoints": [
+        "Object storage for call recordings",
+        "Offline analytics/ML environment",
+        "Fraud/case management systems (batch import of scores)"
+      ]
+    }
+  },
+  "treatment": {
+    "description": "Real-time, streaming integration of the detection and verification pipeline with telephony, IVR, and agent desktop, providing per-chunk risk scores and UX alerts during the active call.",
+    "architecture": {
+      "audio_ingest": "Telephony/CCaaS streaming API (e.g., Twilio Media Streams, Amazon Connect real-time audio, WebRTC softphone) forwards 8 kHz or 16 kHz mono audio frames (e.g., 20\u2013100 ms) to a streaming gateway.",
+      "streaming_gateway": "A lightweight WebSocket/gRPC/WebRTC gateway normalizes incoming audio frames, handles authentication, and publishes them to a message bus (e.g., Kafka, Kinesis, Pub/Sub) keyed by call_id and media_direction (customer/agent).",
+      "detection_and_verification_service": {
+        "pipeline": [
+          "Buffer incoming frames into sliding windows (e.g., 1\u20132 seconds with 50% overlap).",
+          "Extract features and/or embeddings as defined in Chapter 5 baseline pipeline.",
+          "Run synthetic voice detection model and optional speaker verification model.",
+          "Compute incremental risk score and decision state per window (e.g., risk_score in [0,1], decision_state in {undecided, low_risk, elevated_risk, high_risk})."
+        ],
+        "latency_budget_per_window_ms": 250,
+        "deployment": "Containerized microservice (e.g., Docker on Kubernetes) with horizontal pod autoscaling on CPU and/or GPU utilization."
+      },
+      "decision_and_policy_layer": {
+        "logic": [
+          "Aggregate window-level risk scores into call-level state using hysteresis (e.g., N-of-M windows above threshold).",
+          "Emit risk updates as events on a decision topic (e.g., customer_voice_risk_score_updated).",
+          "Apply routing and UX policies (e.g., launch step-up verification in IVR, show agent banner, trigger supervisor whisper)."
+        ],
+        "latency_budget_ms": 100
+      },
+      "downstream_integrations": {
+        "ivr": "Event-driven integration that can trigger step-up authentication flows or route to specialized queues when risk exceeds configured thresholds.",
+        "agent_desktop": "Web UI widget or softphone plugin that subscribes to decision events for the current call_id and renders alerts, banners, or call controls.",
+        "observability": "Export metrics, logs, and traces to monitoring stack (e.g., Prometheus + Grafana, CloudWatch, Stackdriver)."
+      }
+    },
+    "capabilities": {
+      "risk_signal_timing": "Near real-time during the call",
+      "granularity": "Window-level incremental risk scores with aggregated call-level suspicion state",
+      "integration_touchpoints": [
+        "Telephony media streaming APIs",
+        "Streaming gateway and message bus",
+        "Detection and verification microservices",
+        "Decision and policy engine",
+        "IVR flow engine",
+        "Agent desktop/softphone UX",
+        "Monitoring and alerting stack"
+      ]
+    }
+  },
+  "workloads": [
+    {
+      "name": "W1-realistic-multi-tenant-call-simulation",
+      "description": "Synthetic but realistic multi-tenant contact center workload, with a mix of call lengths, simultaneous calls, and audio characteristics representative of an enterprise environment.",
+      "traffic_profile": {
+        "concurrent_calls": [
+          50,
+          200,
+          500,
+          1000
+        ],
+        "call_arrival_pattern": "Poisson arrivals with configurable peak-hour bursts (e.g., 3x baseline rate for 15-minute intervals).",
+        "call_durations_seconds": {
+          "distribution": "lognormal",
+          "median": 420,
+          "p90": 900,
+          "p99": 1500
+        },
+        "customer_audio_mix": {
+          "synthetic_voice_fraction": 0.2,
+          "natural_voice_fraction": 0.8,
+          "languages": [
+            "en-US",
+            "en-GB",
+            "es-ES (optional if models support)",
+            "fr-FR (optional)"
+          ],
+          "channel_conditions": [
+            "clean",
+            "mobile with background noise",
+            "VoIP with jitter"
+          ],
+          "codec_profiles": [
+            "PCMU (G.711)",
+            "Opus @ 16 kHz",
+            "G.729 (if supported)"
+          ]
+        },
+        "routing_mix": {
+          "ivr_only_fraction": 0.3,
+          "ivr_then_agent_fraction": 0.5,
+          "agent_only_fraction": 0.2
+        }
+      },
+      "synthetic_workload_generation": {
+        "audio_sources": {
+          "synthetic": "Pre-generated synthetic voice clips from established TTS/voice cloning tools as defined in prior chapters (e.g., open-source or test-license models).",
+          "natural": "Anonymized, consented recordings from internal or public datasets aligned with enterprise policies."
+        },
+        "call_scripts": "Fixed and variable scripts representing banking, healthcare, and SaaS support intents.",
+        "playout_engine": "Telephony load generator (e.g., SIPp, custom Twilio/Amazon Connect script, or WebRTC bot) that dials into the test contact center and plays back audio according to defined scripts and pauses.",
+        "labeling": "Each call is labeled with ground-truth synthetic/natural voice presence, scenario type, and target queue for offline evaluation."
+      },
+      "modes": [
+        "baseline-batch-mode-only (no streaming detector inline)",
+        "treatment-streaming-mode (real-time detector and policy engine active)"
+      ]
+    },
+    {
+      "name": "W2-latency-focused-single-call-drilldown",
+      "description": "Fine-grained latency characterization with a small number of simultaneous calls to minimize cross-call interference and focus on per-call pipeline timings.",
+      "traffic_profile": {
+        "concurrent_calls": [
+          1,
+          5,
+          10
+        ],
+        "call_durations_seconds": {
+          "fixed": 300
+        },
+        "audio_chunking": {
+          "frame_duration_ms": 20,
+          "window_size_ms": 1000,
+          "window_stride_ms": 500
+        },
+        "content": "Deterministic audio sequences (e.g., repeated phrases) to facilitate reproducible latency measurement and cross-run comparisons."
+      },
+      "modes": [
+        "treatment-streaming-mode (real-time detector inline)",
+        "control-no-detector-mode (audio streaming path active but detector disabled) for measuring integration overhead"
+      ]
+    },
+    {
+      "name": "W3-failure-and-degradation-scenarios",
+      "description": "Targeted experiments to validate fail-safe and fail-open strategies when components degrade or fail.",
+      "traffic_profile": {
+        "concurrent_calls": [
+          50,
+          200
+        ],
+        "call_durations_seconds": {
+          "median": 300,
+          "p90": 600
+        }
+      },
+      "fault_injection": [
+        {
+          "scenario": "detector-service-latency-spike",
+          "method": "Introduce artificial latency into detection service (e.g., +400 ms per window) for a subset of calls.",
+          "expected_policy_behavior": "Detector timeouts trigger defined fail-open or fail-closed routing and UX behaviors without breaking audio delivery."
+        },
+        {
+          "scenario": "message-bus-partition-outage",
+          "method": "Simulate partial or full unavailability of message bus topic(s) used for streaming audio or risk events.",
+          "expected_policy_behavior": "Audio path remains functional if designed to be resilient; detection signals may be absent but IVR and agent flows continue with conservative defaults."
+        },
+        {
+          "scenario": "agent-desktop-disconnected",
+          "method": "Simulate agent desktop widget failure or connectivity issues.",
+          "expected_policy_behavior": "Calls continue; detection decisions are logged and available retrospectively; no misleading partial alerts in the agent UI."
+        }
+      ],
+      "modes": [
+        "treatment-streaming-mode with failover policies configured"
+      ]
+    }
+  ],
+  "controls": {
+    "dataset_and_audio_assets": {
+      "same_across_baseline_and_treatment": true,
+      "description": "Use identical sets of pre-recorded synthetic and natural voice assets, scripts, and call scenarios across all modes and runs to isolate integration effects from model performance differences."
+    },
+    "detection_and_verification_models": {
+      "description": "Reuse the same model artifacts (weights, feature extraction configurations, thresholds) developed in Chapters 5\u20137 for both baseline and treatment. No retraining between modes.",
+      "versioning": "All model versions, feature configs, and thresholds must be tagged and recorded in experiment metadata (e.g., model_version, feature_version, threshold_profile)."
+    },
+    "telephony_and_ccaas_configuration": {
+      "description": "Use the same telephony provider(s), codec settings, call routing, and IVR scripts in both baseline and treatment when real-time features are logically disabled to ensure comparability.",
+      "examples": [
+        "Same DID numbers and IVR menus.",
+        "Same SIP trunking / Twilio/Amazon Connect configuration.",
+        "Same call recording policies and storage locations."
+      ]
+    },
+    "environment_and_resources": {
+      "description": "Fix hardware and cloud resource profiles across comparable runs (e.g., same instance types, node counts, GPU availability) and document any deviations.",
+      "examples": [
+        "Kubernetes cluster node type and count.",
+        "CPU and memory limits per detection pod.",
+        "GPU presence or absence and model execution backend."
+      ]
+    },
+    "configuration_flags": {
+      "description": "Use feature flags to toggle between modes without changing deployed code, minimizing drift.",
+      "flags": [
+        "enable_realtime_detection",
+        "enable_ivf_stepup_routing",
+        "enable_agent_desktop_alerts",
+        "enable_failover_policies"
+      ]
+    },
+    "measurement_period": {
+      "description": "Run each workload/mode combination for a sufficiently long time window (e.g., minimum of N calls per concurrency level) to get stable latency and error estimates.",
+      "minimum_calls_per_condition": 2000
+    }
+  },
+  "metrics": [
+    {
+      "name": "end_to_end_detection_latency_p95",
+      "unit": "milliseconds",
+      "definition": "95th percentile time from receipt of an audio frame at the streaming gateway to availability of a risk score for the corresponding window at the decision layer."
+    },
+    {
+      "name": "end_to_end_detection_latency_p99",
+      "unit": "milliseconds",
+      "definition": "99th percentile of the same latency distribution as above."
+    },
+    {
+      "name": "agent_alert_first_display_time_p95",
+      "unit": "seconds",
+      "definition": "95th percentile of time from call connection to first agent-side risk alert display for calls ultimately labeled as high_risk (synthetic)."
+    },
+    {
+      "name": "ivr_stepup_challenge_trigger_latency_p95",
+      "unit": "milliseconds",
+      "definition": "95th percentile time from crossing the configured risk threshold to the IVR platform receiving an instruction/event to launch a step-up verification flow."
+    },
+    {
+      "name": "cpu_utilization_detector_service_avg",
+      "unit": "percent",
+      "definition": "Average CPU utilization of detection/verification service pods over the experiment window at each concurrency level."
+    },
+    {
+      "name": "memory_utilization_detector_service_avg",
+      "unit": "percent",
+      "definition": "Average memory utilization of detection/verification service pods over the experiment window at each concurrency level."
+    },
+    {
+      "name": "max_concurrent_calls_supported_under_slo",
+      "unit": "count",
+      "definition": "Maximum observed concurrent calls for which end_to_end_detection_latency_p95 remains below 500 ms and call audio is not degraded (no streaming interruptions beyond allowed thresholds)."
+    },
+    {
+      "name": "streaming_audio_packet_loss_rate",
+      "unit": "percent",
+      "definition": "Percentage of audio frames dropped or not processed by the detection pipeline relative to frames sent by the telephony platform."
+    },
+    {
+      "name": "call_audio_mos_estimate",
+      "unit": "MOS (1-5)",
+      "definition": "Estimated Mean Opinion Score (MOS) or equivalent objective metric (e.g., POLQA proxy) for call audio quality under treatment vs baseline."
+    },
+    {
+      "name": "synthetic_detection_recall_realtime",
+      "unit": "percent",
+      "definition": "Recall of synthetic voice detection when using real-time streaming decisions, measured at the call level against offline ground truth labels."
+    },
+    {
+      "name": "synthetic_detection_precision_realtime",
+      "unit": "percent",
+      "definition": "Precision of synthetic voice detection under real-time streaming decisions, measured at the call level against offline ground truth labels."
+    },
+    {
+      "name": "synthetic_detection_recall_batch",
+      "unit": "percent",
+      "definition": "Recall of synthetic voice detection using the baseline batch pipeline on the same call set."
+    },
+    {
+      "name": "synthetic_detection_precision_batch",
+      "unit": "percent",
+      "definition": "Precision of synthetic voice detection using the baseline batch pipeline on the same call set."
+    },
+    {
+      "name": "ivr_reroute_rate_due_to_risk",
+      "unit": "percent_of_calls",
+      "definition": "Percentage of calls for which IVR flow or routing decisions were altered due to elevated risk signals in treatment mode."
+    },
+    {
+      "name": "agent_alert_rate",
+      "unit": "percent_of_calls",
+      "definition": "Percentage of agent-handled calls that resulted in at least one synthetic voice risk alert being displayed."
+    },
+    {
+      "name": "detector_service_error_rate",
+      "unit": "errors_per_1000_requests",
+      "definition": "Rate of non-success responses (5xx, explicit failures) from detection/verification service endpoints."
+    },
+    {
+      "name": "policy_engine_timeout_rate",
+      "unit": "timeouts_per_1000_decisions",
+      "definition": "Rate at which the policy/decision engine times out waiting for detection results and must apply a fail-safe or fail-open rule."
+    },
+    {
+      "name": "agent_desktop_latency_to_render_alert_p95",
+      "unit": "milliseconds",
+      "definition": "95th percentile time from risk event emission to the alert being rendered in the agent desktop UI as measured by instrumentation within the agent widget."
+    }
+  ],
+  "success_criteria": {
+    "primary": [
+      {
+        "metric": "end_to_end_detection_latency_p95",
+        "target": "<= 500 ms",
+        "scope": "At or below 500 ms for all tested concurrency levels up to 1,000 concurrent calls in W1 and W2."
+      },
+      {
+        "metric": "max_concurrent_calls_supported_under_slo",
+        "target": ">= 1000",
+        "scope": "Treatment mode must support at least 1,000 concurrent calls while satisfying the latency SLO and without exceeding 80% average CPU utilization on detector service pods."
+      },
+      {
+        "metric": "streaming_audio_packet_loss_rate",
+        "target": "<= 1%",
+        "scope": "Packet/frame loss attributable to the streaming integration and detection pipeline must remain at or below 1%."
+      }
+    ],
+    "secondary": [
+      {
+        "metric": "agent_alert_first_display_time_p95",
+        "target": "<= 10 seconds",
+        "scope": "For calls labeled as high_risk, the first agent alert should appear within 10 seconds of call start in at least 95% of such calls."
+      },
+      {
+        "metric": "synthetic_detection_recall_realtime",
+        "comparison": ">= (synthetic_detection_recall_batch - 5 percentage points)",
+        "scope": "Real-time recall must be within 5 percentage points of recall achieved by the offline batch pipeline on the same calls."
+      },
+      {
+        "metric": "synthetic_detection_precision_realtime",
+        "comparison": ">= (synthetic_detection_precision_batch - 5 percentage points)",
+        "scope": "Real-time precision must be within 5 percentage points of precision achieved by the offline batch pipeline."
+      },
+      {
+        "metric": "call_audio_mos_estimate",
+        "comparison": "treatment MOS >= baseline MOS - 0.2",
+        "scope": "Real-time integration must not reduce estimated audio quality by more than 0.2 MOS points vs baseline."
+      }
+    ],
+    "qualitative": [
+      "Fail-safe and fail-open behaviors in W3 align with documented policy (e.g., calls remain connected; IVR and agents fall back to conservative routing when detector is unavailable).",
+      "No systematic deadlocks, call drops, or unusable agent desktop behavior attributable to the detection integration are observed during stress scenarios."
+    ]
+  },
+  "failure_modes": [
+    {
+      "name": "latency_slo_breach_under_load",
+      "description": "end_to_end_detection_latency_p95 exceeds 500 ms at or below the target 1,000 concurrent calls, leading to stale or unusable real-time decisions.",
+      "likely_causes": [
+        "Insufficient horizontal scaling or autoscaling of detector services.",
+        "Model inference latency exceeding assumed budget (e.g., heavier models deployed unintentionally).",
+        "Message bus backpressure or oversized buffering windows."
+      ],
+      "mitigations": [
+        "Implement dynamic model selection (light vs heavy models based on load).",
+        "Tune autoscaling thresholds and add capacity.",
+        "Reduce window_size_ms or increase stride to reduce computation per unit time."
+      ]
+    },
+    {
+      "name": "audio_quality_regression",
+      "description": "Integration introduces jitter, packet loss, or transcoding artifacts that materially degrade call audio quality.",
+      "likely_causes": [
+        "In-line media processing path instead of side-stream duplication.",
+        "Excessive transcoding between codecs and sample rates.",
+        "Network bottlenecks between telephony platform and detection infrastructure."
+      ],
+      "mitigations": [
+        "Prefer forked/duplicated media streams for analysis (non-blocking).",
+        "Minimize codec conversions and standardize on limited set of sample rates.",
+        "Co-locate detector infrastructure with telephony region and enable QoS where available."
+      ]
+    },
+    {
+      "name": "unstable_agent_experience",
+      "description": "Agent desktop alerts are delayed, inconsistent across similar calls, or fail silently in degraded conditions.",
+      "likely_causes": [
+        "Unreliable event subscription or WebSocket connections.",
+        "Lack of local timeout/health logic in the agent widget.",
+        "Race conditions between call setup and subscription to risk events."
+      ],
+      "mitigations": [
+        "Add robust reconnection and backoff strategies in the agent plugin.",
+        "Implement explicit call_id binding and late-subscription replay of latest risk state.",
+        "Display clear indicator when real-time risk is unavailable (rather than silent failure)."
+      ]
+    },
+    {
+      "name": "policy_engine_overload_or_deadlocks",
+      "description": "Decision engine becomes a bottleneck or experiences deadlocks during high load or when components fail.",
+      "likely_causes": [
+        "Synchronous dependencies on external services with blocking I/O.",
+        "Unbounded state accumulation per call.",
+        "Circular event flows between IVR and decision engine."
+      ],
+      "mitigations": [
+        "Adopt asynchronous patterns and strict timeouts.",
+        "Bound per-call state and expire completed calls promptly.",
+        "Test and validate policy graphs to avoid circular dependencies."
+      ]
+    },
+    {
+      "name": "drift_between_batch_and_realtime_results",
+      "description": "Significant discrepancies between batch and real-time detection outcomes on the same calls reduce trust in the system.",
+      "likely_causes": [
+        "Different pre-processing or feature extraction paths.",
+        "Different model versions accidentally deployed.",
+        "Context length differences (full-call vs sliding windows) without appropriate aggregation logic."
+      ],
+      "mitigations": [
+        "Unify feature extraction codepaths and share model artifacts.",
+        "Introduce strict model version pinning and deployment checks.",
+        "Design aggregation logic to approximate batch-level context where possible and validate with offline experiments."
+      ]
+    }
+  ],
+  "required_environment": {
+    "telephony_and_ivr": {
+      "options": [
+        "Twilio Programmable Voice with Media Streams enabled.",
+        "Amazon Connect with real-time audio streaming configured.",
+        "A self-hosted SIP+WebRTC testbed with a softphone and media forking."
+      ],
+      "requirements": [
+        "Ability to route test calls through a controllable IVR script.",
+        "Support for forking or streaming media to an external endpoint in near real-time.",
+        "Access to call logs and correlation IDs for mapping to detection events."
+      ]
+    },
+    "agent_desktop": {
+      "description": "A simple web-based agent console with softphone integration or embedded CTI widget.",
+      "requirements": [
+        "Capability to render a JavaScript widget or iframe that subscribes to risk events via WebSocket/HTTP.",
+        "Access to call_id or similar identifier within the agent UI context."
+      ]
+    },
+    "streaming_and_compute_infrastructure": {
+      "message_bus": "Kafka, Amazon Kinesis, or Google Pub/Sub (or equivalent) for audio frames and risk events.",
+      "compute": "Kubernetes cluster or equivalent container orchestration with autoscaling capabilities.",
+      "resources": {
+        "baseline_suggestion": "At least 3\u20135 nodes with 8 vCPUs and 32 GB RAM each for CPU-based inference; additional GPU nodes if using GPU-accelerated models.",
+        "storage": "Object storage bucket for call recordings and experiment logs."
+      }
+    },
+    "detection_and_verification_stack": {
+      "models": "Synthetic vs natural voice detector and optional speaker verification models from prior chapters, containerized with consistent APIs.",
+      "services": [
+        "Audio pre-processing and feature extraction service.",
+        "Inference service for detection and verification.",
+        "Policy/decision engine service."
+      ]
+    },
+    "observability_stack": {
+      "metrics": "Prometheus or cloud-native metrics collection with dashboards (Grafana, CloudWatch, etc.).",
+      "logs": "Centralized logging (e.g., ELK, Cloud Logging).",
+      "traces": "Optional distributed tracing (e.g., OpenTelemetry) for end-to-end latency measurement."
+    },
+    "load_generation": {
+      "tools": [
+        "SIPp or similar SIP-based call generator.",
+        "Custom scripts using telephony APIs (Twilio, Amazon Connect) to simulate callers.",
+        "Audio playback tools that can stream prerecorded audio over calls."
+      ],
+      "requirements": [
+        "Ability to script call arrival patterns and durations.",
+        "Capability to select synthetic vs natural audio assets per call."
+      ]
+    }
+  },
+  "run_instructions": [
+    "1. Prepare models and baseline pipeline:\n   1.1. Export the synthetic voice detector and speaker verification models from the Chapter 5\u20137 repository code with fixed versions (e.g., model_version tags).\n   1.2. Containerize the models with a standard inference API (e.g., /detect, /verify) and health endpoints.\n   1.3. Validate that the batch pipeline reproduces previously established metrics on a held-out audio set.",
+    "2. Stand up telephony/IVR test environment:\n   2.1. Provision a sandbox account with the selected telephony/CCaaS provider.\n   2.2. Configure a test phone number and IVR script that includes basic menus and a path to an agent queue or echo agent.\n   2.3. Enable call recording to object storage for all test calls.\n   2.4. Enable media streaming or media forking to a configurable endpoint, ensuring call_id and media metadata are attached.",
+    "3. Deploy streaming gateway and message bus:\n   3.1. Deploy a streaming gateway service that terminates telephony media streams and publishes normalized audio frames to the message bus.\n   3.2. Define topics or streams for raw_audio_frames, detection_results, and policy_decisions keyed by call_id.\n   3.3. Implement basic backpressure handling and logging for dropped or delayed frames.",
+    "4. Deploy detection/verification and policy services:\n   4.1. Deploy the audio pre-processing and feature extraction service that consumes raw_audio_frames and emits features/windows.\n   4.2. Deploy detection and verification inference services that consume features and produce risk scores, speaker verification results, and associated metadata.\n   4.3. Deploy the policy/decision engine that receives detection events, maintains per-call state, and emits policy_decisions (e.g., risk_level, recommended_action).\n   4.4. Configure horizontal autoscaling rules and resource limits for each service.\n   4.5. Instrument each service with metrics and tracing for latency and error tracking.",
+    "5. Integrate IVR and agent desktop with decision events:\n   5.1. Modify the IVR flow to subscribe to policy_decisions for the active call_id and to support conditional branches based on risk_level (e.g., trigger step-up verification for high_risk calls).\n   5.2. Implement an agent desktop widget or plugin that subscribes to policy_decisions and displays alerts, including risk_level and simple guidance.\n   5.3. Add UI telemetry to record event receipt times and render times for agent alerts.",
+    "6. Configure baseline (batch) pipeline:\n   6.1. Implement a batch job that periodically scans call recordings, runs the detection/verification models, and stores results in a database.\n   6.2. Ensure that call_ids and timestamps align with those used in treatment mode for comparable evaluation.\n   6.3. Run sanity checks to confirm that batch results match expectations.",
+    "7. Define experiment configurations and feature flags:\n   7.1. Introduce configuration flags or environment variables to toggle real-time detection, IVR behaviors, and agent alerts on/off without altering code.\n   7.2. Create configuration profiles for: baseline-batch-mode-only, treatment-streaming-mode, and control-no-detector-mode.\n   7.3. Store configuration snapshots and hashes in an experiment manifest for reproducibility.",
+    "8. Run Workload W1 (multi-tenant simulation):\n   8.1. For each target concurrency level (50, 200, 500, 1000), configure the load generator with the defined call arrival patterns, durations, and synthetic/natural audio mix.\n   8.2. First, run baseline-batch-mode-only with real-time detection disabled. Collect system load, audio quality metrics, and baseline call statistics.\n   8.3. Then, run treatment-streaming-mode with real-time detection and policy decisions enabled. Ensure identical traffic profiles (use fixed seeds and schedules when possible).\n   8.4. During each run, continuously collect metrics, logs, and traces. Store them with timestamps and experiment IDs.\n   8.5. After runs, execute the batch detection pipeline over recorded calls for both modes to obtain batch synthetic detection metrics.",
+    "9. Run Workload W2 (latency drilldown):\n   9.1. Configure small numbers of concurrent calls (1, 5, 10) with fixed audio content and precise chunking parameters.\n   9.2. Run in control-no-detector-mode to measure baseline end-to-end audio path latency and overhead without detection.\n   9.3. Run in treatment-streaming-mode and measure detailed per-stage latency via traces (gateway, bus, feature extraction, inference, policy, agent UI).\n   9.4. Verify that event timelines and latency measurements are consistent across repeated runs.",
+    "10. Run Workload W3 (failure and degradation scenarios):\n   10.1. Select a subset of concurrency levels (e.g., 50, 200) and configure normal traffic patterns.\n   10.2. For each fault scenario (detector-service-latency-spike, message-bus-partition-outage, agent-desktop-disconnected), inject faults according to the defined methods.\n   10.3. Observe and log fail-safe/fail-open outcomes in IVR, agent desktop, and overall call continuity.\n   10.4. Confirm that policy_engine_timeout_rate and detector_service_error_rate remain within pre-agreed operational bounds or are at least detectable via monitoring.",
+    "11. Post-processing and analysis:\n   11.1. Aggregate metrics across all workloads and modes into a structured dataset keyed by experiment_id, workload, mode, concurrency_level, and time window.\n   11.2. Compute latency percentiles, CPU/memory utilization statistics, packet loss, call_audio_mos_estimate (or proxy), and detection precision/recall for both real-time and batch pipelines.\n   11.3. Identify the maximum concurrency level at which the latency SLO (500 ms p95) and audio quality constraints are satisfied.\n   11.4. Compare detection performance between real-time and batch modes to assess any trade-offs.\n   11.5. Document observed failure behaviors and validate whether they match intended policies.",
+    "12. Documentation and reproducibility:\n   12.1. Store experiment manifests (configurations, code versions, model versions) alongside raw and aggregated metrics in the repository or data warehouse.\n   12.2. Produce runbooks and diagrams summarizing the final integration architecture, latency breakdowns, and scaling characteristics.\n   12.3. Tag the repository state (e.g., git tag) corresponding to the experiment for future reference and reuse."
+  ],
+  "evidence_schema": {
+    "type": "object",
+    "required": [
+      "experiment_id",
+      "workload_results",
+      "config_snapshot",
+      "model_versions",
+      "metrics_summary",
+      "raw_metrics_location",
+      "logs_and_traces_location",
+      "observed_failures"
+    ],
+    "properties": {
+      "experiment_id": {
+        "type": "string",
+        "description": "Identifier for the experiment run, matching the experiment_id field of this specification."
+      },
+      "workload_results": {
+        "type": "array",
+        "description": "Per-workload and per-mode results.",
+        "items": {
+          "type": "object",
+          "required": [
+            "workload_name",
+            "mode",
+            "concurrency_level",
+            "metrics"
+          ],
+          "properties": {
+            "workload_name": {
+              "type": "string",
+              "enum": [
+                "W1-realistic-multi-tenant-call-simulation",
+                "W2-latency-focused-single-call-drilldown",
+                "W3-failure-and-degradation-scenarios"
+              ]
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "baseline-batch-mode-only",
+                "treatment-streaming-mode",
+                "control-no-detector-mode"
+              ]
+            },
+            "concurrency_level": {
+              "type": "integer",
+              "description": "Number of concurrent calls during this subset of the run."
+            },
+            "metrics": {
+              "type": "object",
+              "description": "Measured metrics for this workload/mode/concurrency combination.",
+              "properties": {
+                "end_to_end_detection_latency_p95": {
+                  "type": "number"
+                },
+                "end_to_end_detection_latency_p99": {
+                  "type": "number"
+                },
+                "agent_alert_first_display_time_p95": {
+                  "type": "number"
+                },
+                "ivr_stepup_challenge_trigger_latency_p95": {
+                  "type": "number"
+                },
+                "cpu_utilization_detector_service_avg": {
+                  "type": "number"
+                },
+                "memory_utilization_detector_service_avg": {
+                  "type": "number"
+                },
+                "max_concurrent_calls_supported_under_slo": {
+                  "type": "number"
+                },
+                "streaming_audio_packet_loss_rate": {
+                  "type": "number"
+                },
+                "call_audio_mos_estimate": {
+                  "type": "number"
+                },
+                "synthetic_detection_recall_realtime": {
+                  "type": "number"
+                },
+                "synthetic_detection_precision_realtime": {
+                  "type": "number"
+                },
+                "synthetic_detection_recall_batch": {
+                  "type": "number"
+                },
+                "synthetic_detection_precision_batch": {
+                  "type": "number"
+                },
+                "ivr_reroute_rate_due_to_risk": {
+                  "type": "number"
+                },
+                "agent_alert_rate": {
+                  "type": "number"
+                },
+                "detector_service_error_rate": {
+                  "type": "number"
+                },
+                "policy_engine_timeout_rate": {
+                  "type": "number"
+                },
+                "agent_desktop_latency_to_render_alert_p95": {
+                  "type": "number"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "config_snapshot": {
+        "type": "object",
+        "description": "Snapshot of relevant configuration at run time.",
+        "properties": {
+          "telephony_provider": {
+            "type": "string"
+          },
+          "ivr_config_version": {
+            "type": "string"
+          },
+          "agent_desktop_version": {
+            "type": "string"
+          },
+          "kubernetes_cluster_config": {
+            "type": "string"
+          },
+          "feature_flags": {
+            "type": "object",
+            "properties": {
+              "enable_realtime_detection": {
+                "type": "boolean"
+              },
+              "enable_ivf_stepup_routing": {
+                "type": "boolean"
+              },
+              "enable_agent_desktop_alerts": {
+                "type": "boolean"
+              },
+              "enable_failover_policies": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      },
+      "model_versions": {
+        "type": "object",
+        "description": "Versions and identifiers of detection and verification models and feature extractors used.",
+        "properties": {
+          "synthetic_detector_model_version": {
+            "type": "string"
+          },
+          "speaker_verification_model_version": {
+            "type": "string"
+          },
+          "feature_extractor_version": {
+            "type": "string"
+          },
+          "threshold_profile_id": {
+            "type": "string"
+          }
+        }
+      },
+      "metrics_summary": {
+        "type": "object",
+        "description": "High-level summary of whether success criteria were met.",
+        "properties": {
+          "primary_slo_met": {
+            "type": "boolean"
+          },
+          "max_concurrent_calls_under_slo": {
+            "type": "integer"
+          },
+          "realtime_vs_batch_recall_delta": {
+            "type": "number"
+          },
+          "realtime_vs_batch_precision_delta": {
+            "type": "number"
+          },
+          "audio_quality_delta_mos": {
+            "type": "number"
+          },
+          "notes": {
+            "type": "string"
+          }
+        }
+      },
+      "raw_metrics_location": {
+        "type": "string",
+        "description": "URI or path to raw metrics data (e.g., object storage path, database table, or metrics export)."
+      },
+      "logs_and_traces_location": {
+        "type": "string",
+        "description": "URI or path to relevant logs and trace data collected during the experiment."
+      },
+      "observed_failures": {
+        "type": "array",
+        "description": "List of observed failures or unexpected behaviors during the runs.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "failure_mode_name": {
+              "type": "string"
+            },
+            "workload_name": {
+              "type": "string"
+            },
+            "mode": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "impact": {
+              "type": "string"
+            },
+            "mitigation_applied": {
+              "type": "string"
+            },
+            "logs_reference": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

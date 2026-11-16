@@ -1,0 +1,667 @@
+{
+  "experiment_id": "chap6-beyond-baseline-detectors-ensembles-v1",
+  "hypothesis": [
+    "H1 (ensemble benefit): For enterprise voice-cloning detection in customer service audio, well-calibrated ensembles that combine heterogeneous detectors (signal-level supervised models, self-supervised representations, and heuristic/metadata features) will achieve a strictly better operating curve (ROC/PR), with lower business-relevant false negative rates at fixed false positive rates, than any individual detector configured in isolation.",
+    "H2 (domain adaptation): Lightweight domain adaptation (fine-tuning or calibration on small in-domain samples for new languages/accents/channels) will recover a substantial fraction of the baseline-domain performance (e.g., \u226570% of AUC/EER gap) relative to non-adapted detectors when evaluated on mismatched conditions typical of enterprise deployments.",
+    "H3 (cost-aware optimization): When cost (latency, compute, licensing) is explicitly incorporated into model selection and fusion rules, enterprises can identify ensemble configurations that are Pareto-efficient\u2014dominated neither in detection quality nor in cost\u2014relative to naive 'strongest model only' or 'everything everywhere' strategies."
+  ],
+  "baseline": {
+    "description": "Single-model baseline synthetic vs. human voice detector as implemented in Chapter 5: a supervised signal-level classifier deployed as a service, trained and evaluated on a base-domain dataset of English, narrowband (8 kHz) customer-service-style audio.",
+    "detectors": [
+      {
+        "id": "baseline_cnn_mfcc",
+        "type": "supervised_classifier",
+        "implementation": "Convolutional neural network over log-Mel spectrograms or MFCCs with a sigmoid output for synthetic vs. human classification.",
+        "training_data": "Base-domain dataset D_base (e.g., curated from public synthetic voice corpora plus matched human speech segments) as defined in the Chapter 5 pipeline.",
+        "inference_interface": "HTTP/REST API service (Docker container) exposing /predict that returns p_synth for each audio segment.",
+        "expected_operating_point": "Threshold \u03c4_base selected on a held-out validation split of D_base to achieve a business-defined trade-off (e.g., target FAR/FRR or EER) as in Chapter 5."
+      }
+    ],
+    "evaluation_setup": {
+      "datasets": [
+        "D_base_test: Held-out test partition (same language/accent/channel as training).",
+        "D_new_lang: Different language (e.g., Spanish or another non-English language) with similar channel conditions, including synthetic and human speech.",
+        "D_new_channel: Same language as D_base but different telephony-like channels (e.g., VoIP compression, mobile recordings, background noise).",
+        "D_adv_tools: Synthetic voices generated using a set of contemporary voice cloning tools not seen during training (different architectures/providers)."
+      ],
+      "metrics": [
+        "AUC_ROC",
+        "AUC_PR",
+        "EER",
+        "FNR_at_fixed_FPR (e.g., FNR at 1% FPR, 5% FPR)",
+        "Latency_p95 (ms per 10s-equivalent audio)",
+        "CPU_ms_per_min_audio",
+        "GPU_ms_per_min_audio (if applicable)",
+        "Licensing_cost_per_1k_minutes (if applicable or estimated)"
+      ]
+    }
+  },
+  "treatment": {
+    "description": "Multiple detection strategies and ensembles evaluated within a shared experimental harness that standardizes datasets, preprocessing, metric computation, and cost analysis.",
+    "detectors": [
+      {
+        "id": "sup_cnn_mfcc_v2",
+        "type": "supervised_classifier",
+        "notes": "Incremental variant of the baseline CNN with tuned architecture/regularization but same input features and training data; serves as a supervised comparator."
+      },
+      {
+        "id": "selfsup_embedding_classifier",
+        "type": "self_supervised_plus_linear_head",
+        "notes": "Self-supervised speech representation model (e.g., wav2vec-style or HuBERT-style backbone) frozen or lightly fine-tuned, followed by a small supervised classifier trained on D_base."
+      },
+      {
+        "id": "heuristic_metadata_rule_based",
+        "type": "heuristic_detector",
+        "notes": "Simple feature and rule-based detector using non-neural cues such as spectral flatness anomalies, pitch/energy statistics, jitter/shimmer proxies, detection of known watermarking patterns when present, and call metadata (e.g., ASR confidence, call path) when available."
+      },
+      {
+        "id": "external_api_detector",
+        "type": "proprietary_or_third_party",
+        "notes": "Optional integration with a vendor-provided synthetic voice classifier via API, where licensing costs are modeled; used where organizational policies allow."
+      }
+    ],
+    "ensembles": [
+      {
+        "id": "ensemble_majority_vote",
+        "method": "hard_voting",
+        "description": "Binary hard-voting ensemble that thresholds each component detector to synthetic/human using per-detector validation-tuned thresholds, then applies majority vote to yield a final label.",
+        "components": [
+          "baseline_cnn_mfcc",
+          "selfsup_embedding_classifier",
+          "heuristic_metadata_rule_based"
+        ]
+      },
+      {
+        "id": "ensemble_weighted_soft",
+        "method": "soft_voting",
+        "description": "Weighted average of calibrated synthetic probabilities from each component detector, with weights learned on a validation set to optimize a specified objective (e.g., minimize FNR at 1% FPR).",
+        "components": [
+          "baseline_cnn_mfcc",
+          "selfsup_embedding_classifier",
+          "heuristic_metadata_rule_based",
+          "external_api_detector"
+        ],
+        "constraints": "Weights must be non-negative and sum to 1. External detector may be omitted if unavailable; ensure configuration files clearly document active components."
+      },
+      {
+        "id": "ensemble_stacking_meta_lr",
+        "method": "stacked_generalization",
+        "description": "Meta-classifier (e.g., logistic regression or gradient-boosted tree) trained on out-of-fold predictions and side-channel features (e.g., channel type) from base detectors to produce final synthetic probabilities.",
+        "components": [
+          "baseline_cnn_mfcc",
+          "selfsup_embedding_classifier",
+          "heuristic_metadata_rule_based"
+        ],
+        "training_protocol": "K-fold cross-validation over D_base_train to obtain unbiased out-of-fold predictions for meta-learner training."
+      },
+      {
+        "id": "ensemble_risk_tiered_fusion",
+        "method": "risk_based_decision_fusion",
+        "description": "Decision rule that fuses detector scores with business context (call risk tier, transaction amount, customer segment) to implement tiered thresholds and fallback behaviors.",
+        "components": [
+          "baseline_cnn_mfcc",
+          "selfsup_embedding_classifier"
+        ],
+        "policy_examples": [
+          "Low-risk: Use single fast detector (baseline_cnn_mfcc) with relaxed threshold.",
+          "Medium-risk: Require agreement between baseline and self-supervised detectors for 'human' decision; disagreement triggers agent review.",
+          "High-risk: Default to 'suspected synthetic' unless strong evidence from both models supports 'human' plus additional verification factors."
+        ]
+      }
+    ],
+    "domain_adaptation_strategies": [
+      {
+        "id": "lang_specific_finetune",
+        "description": "Fine-tune supervised and self-supervised-based detectors using a small labeled sample from new-language dataset D_new_lang_train while freezing early layers to mitigate overfitting.",
+        "data_budget": "e.g., 5\u201320 hours total labeled audio per condition, stratified across synthetic/human and key accents."
+      },
+      {
+        "id": "channel_calibration_only",
+        "description": "Do not change model weights; instead, recalibrate decision thresholds or apply temperature scaling on D_new_channel_val to restore desired FPR/FNR trade-offs.",
+        "data_budget": "e.g., 500\u20132,000 short segments per channel type."
+      },
+      {
+        "id": "unsupervised_domain_alignment",
+        "description": "Optional: Use unlabeled in-domain audio (mixed synthetic likelihood) to adapt normalization layers or feature statistics (e.g., CMVN) without labels.",
+        "data_budget": "e.g., 50\u2013100 hours unlabeled, where accessible under privacy policies."
+      }
+    ],
+    "adversarial_evaluation": {
+      "description": "Stress-testing all detectors and ensembles using audio generated from a curated set of known voice cloning tools and parameter settings.",
+      "attack_tools": [
+        "Tool_A_generic_neural_cloner",
+        "Tool_B_zero_shot_commercial_api",
+        "Tool_C_low_resource_open_source"
+      ],
+      "attack_parameters": [
+        "Variation in cloning data duration (few seconds vs. minutes).",
+        "Variation in synthesis text complexity and prosody.",
+        "Post-processing: noise injection, codec changes, mixing with background audio, replay through real telephony paths where feasible."
+      ]
+    },
+    "cost_aware_configs": [
+      {
+        "id": "config_low_cost",
+        "description": "Use only baseline_cnn_mfcc with optimized batching and CPU-only inference; intended for large-volume, lower-risk call flows.",
+        "constraints": "Latency_p95 per 10s audio must remain under an enterprise-defined target (e.g., 200 ms) and infrastructure cost must be minimized."
+      },
+      {
+        "id": "config_high_security",
+        "description": "Use ensemble_stacking_meta_lr plus external_api_detector for high-risk transaction flows, accepting higher compute and licensing costs.",
+        "constraints": "Latency_p95 per 10s audio must remain under a stricter target (e.g., 500 ms), and cost per 1k minutes must be explicitly measured."
+      }
+    ]
+  },
+  "workloads": [
+    {
+      "id": "WL1_base_domain_eval",
+      "description": "Evaluation on base-domain test set D_base_test using identical pre-processing across all detectors in the harness.",
+      "data_characteristics": {
+        "languages": [
+          "English"
+        ],
+        "channels": [
+          "simulated or real contact center narrowband telephony (8 kHz)."
+        ],
+        "labels": [
+          "synthetic",
+          "human"
+        ],
+        "segment_length": "Short segments (e.g., 3\u201315 seconds) sampled from longer calls; segment-level labels assigned based on dominant content.",
+        "size": "Sufficient for statistically stable ROC and PR curves (e.g., at least several thousand segments per class)."
+      },
+      "purpose": "Quantify improvements of individual detectors and ensembles over the Chapter 5 baseline under in-domain conditions."
+    },
+    {
+      "id": "WL2_new_language_eval",
+      "description": "Cross-language generalization evaluation using D_new_lang before and after application of domain adaptation strategies.",
+      "data_characteristics": {
+        "languages": [
+          "Non-English language(s) relevant to the intended deployment, such as Spanish, Portuguese, or others."
+        ],
+        "channels": [
+          "Similar telephony or VoIP conditions as D_base where possible."
+        ],
+        "labels": [
+          "synthetic",
+          "human"
+        ],
+        "segment_length": "Comparable to WL1 for comparability of metrics.",
+        "size": "Adequate to compute stable AUC/EER and FNR@FPR estimates; class balance should be approximately even or documented."
+      },
+      "purpose": "Test hypothesis H2 by measuring performance drop due to language shift and the degree to which adaptation closes the gap."
+    },
+    {
+      "id": "WL3_new_channel_eval",
+      "description": "Channel-mismatched evaluation using D_new_channel, including mobile, VoIP, and potentially noisy environments.",
+      "data_characteristics": {
+        "languages": [
+          "Same as D_base to isolate channel effects where feasible."
+        ],
+        "channels": [
+          "Mobile network codecs, VoIP with varying jitter/packet loss, on-premise PBX, and other relevant paths."
+        ],
+        "labels": [
+          "synthetic",
+          "human"
+        ],
+        "segment_length": "Same as WL1 for comparability.",
+        "size": "Sufficient volume across channel types to allow per-channel metric reporting."
+      },
+      "purpose": "Evaluate channel robustness of detectors and ensembles, and compare calibration-based vs. weight-updating adaptation under typical enterprise telephony diversity."
+    },
+    {
+      "id": "WL4_adversarial_tools_eval",
+      "description": "Adversarial stress-testing using D_adv_tools generated from multiple cloning tools and post-processing chains.",
+      "data_characteristics": {
+        "languages": [
+          "At least the primary supported languages in enterprise deployments; prioritize English plus one additional language if possible."
+        ],
+        "channels": [
+          "Include 'clean' synthetic outputs and versions post-processed through actual or emulated telephony chains."
+        ],
+        "labels": [
+          "synthetic",
+          "human"
+        ],
+        "segment_length": "May include both short prompts and longer conversational excerpts; record length distributions.",
+        "size": "Enough diversity across tools and parameterizations to prevent overfitting detectors to a single cloning pattern."
+      },
+      "purpose": "Assess resilience of detection strategies and ensembles against realistic adversary capabilities; probe for systematic blind spots."
+    },
+    {
+      "id": "WL5_cost_latency_benchmark",
+      "description": "Throughput and latency benchmarking for selected configurations (baseline and ensembles) under realistic call-volume simulations.",
+      "data_characteristics": {
+        "languages": [
+          "Mix reflecting actual call distributions where possible."
+        ],
+        "channels": [
+          "Representative mix of channels present in target deployment."
+        ],
+        "labels": "Not required for pure latency/cost measurement; any previously used evaluation audio may be reused.",
+        "segment_length": "Distributions approximating real average talk times and chunk sizes used in streaming setups (e.g., 1\u20135 second buffers).",
+        "size": "Large enough to saturate system under expected peak concurrency (e.g., tens of thousands of segments)."
+      },
+      "purpose": "Quantitatively estimate latency, resource utilization, and approximate cost for multiple detector and ensemble configurations to support cost-benefit trade-off analysis."
+    }
+  ],
+  "controls": {
+    "randomness": [
+      "Set and log global random seeds for all frameworks used (e.g., Python, NumPy, PyTorch/TF, any gradient boosters).",
+      "Ensure deterministic data shuffling and split generation by storing and versioning split indices (train/val/test) instead of regenerating on each run.",
+      "Use fixed cross-validation folds for stacking meta-model training and preserve them in configuration files under version control."
+    ],
+    "data_handling": [
+      "Use immutable dataset manifests referencing exact audio files and checksums; store under version control or a data registry.",
+      "Standardize pre-processing steps (resampling, mono conversion, normalization, feature extraction) across detectors where applicable and document any detector-specific divergences.",
+      "Ensure that no speaker, call, or cloning session appears in both training and test splits to avoid leakage, particularly for adversarial datasets.",
+      "Explicitly separate data used for domain adaptation (fine-tuning or calibration) from held-out domain test sets."
+    ],
+    "evaluation_protocol": [
+      "Implement a single, shared evaluation harness that all detectors and ensembles plug into, responsible for loading datasets, running inference, computing metrics, and logging results.",
+      "Run all models on the same hardware profile when comparing latency and throughput; document CPU/GPU model, memory, and concurrency settings.",
+      "For each configuration, perform at least N_rep repetitions (e.g., 3\u20135) of latency benchmarking to account for variability; report median and dispersion (e.g., IQR or standard deviation).",
+      "Use consistent segment-level decision rules and aggregation strategies (if aggregating to call-level metrics) across detectors and ensembles."
+    ],
+    "hyperparameters": [
+      "Maintain a central configuration file (e.g., YAML) listing hyperparameters for each detector and ensemble, checked into the repository.",
+      "Perform hyperparameter tuning on validation sets only; avoid peeking at test performance when selecting hyperparameters.",
+      "For ensembles, lock the fusion weights, voting rules, or meta-model parameters after validation; do not adjust based on test set results."
+    ],
+    "governance_and_compliance": [
+      "Before using any real customer audio, ensure compliance review and necessary approvals; where possible, rely on anonymized or synthetic training/evaluation datasets.",
+      "Ensure that any integration with third-party or proprietary detectors complies with licensing terms and data-processing agreements.",
+      "Document the provenance and licensing of all datasets and tools, particularly adversarial voice cloning tools, in a separate manifest."
+    ]
+  },
+  "metrics": [
+    {
+      "name": "AUC_ROC",
+      "unit": "dimensionless (0\u20131)",
+      "description": "Area under the receiver operating characteristic curve computed over segment-level synthetic vs. human classification scores."
+    },
+    {
+      "name": "AUC_PR",
+      "unit": "dimensionless (0\u20131)",
+      "description": "Area under the precision\u2013recall curve; especially informative when synthetic segments are rare relative to human segments."
+    },
+    {
+      "name": "EER",
+      "unit": "fraction (0\u20131)",
+      "description": "Equal error rate at the operating point where false acceptance and false rejection rates are equal."
+    },
+    {
+      "name": "FNR_at_1pct_FPR",
+      "unit": "fraction (0\u20131)",
+      "description": "False negative rate (synthetic misclassified as human) when threshold is chosen to yield approximately 1% false positive rate on validation data."
+    },
+    {
+      "name": "FNR_at_5pct_FPR",
+      "unit": "fraction (0\u20131)",
+      "description": "False negative rate at approximately 5% false positive rate; provides insight into behavior at a more permissive operating point."
+    },
+    {
+      "name": "Latency_p50",
+      "unit": "milliseconds per standardized audio unit (e.g., per 10 seconds equivalent)",
+      "description": "Median per-sample inference latency measured end-to-end within the harness, including I/O and pre-processing."
+    },
+    {
+      "name": "Latency_p95",
+      "unit": "milliseconds per standardized audio unit (e.g., per 10 seconds equivalent)",
+      "description": "95th percentile per-sample inference latency; important for real-time call handling SLAs."
+    },
+    {
+      "name": "Throughput_rps",
+      "unit": "requests (segments) per second",
+      "description": "Sustained throughput achieved at a specified concurrency level while maintaining latency SLAs."
+    },
+    {
+      "name": "CPU_ms_per_min_audio",
+      "unit": "CPU-milliseconds per minute of processed audio",
+      "description": "Approximate CPU cost normalized by audio length; useful for cost projections in CPU-bound deployments."
+    },
+    {
+      "name": "GPU_ms_per_min_audio",
+      "unit": "GPU-milliseconds per minute of processed audio",
+      "description": "Approximate GPU cost normalized by audio length; relevant for GPU-accelerated deployments."
+    },
+    {
+      "name": "Licensing_cost_per_1k_minutes",
+      "unit": "monetary units per 1,000 minutes (e.g., USD/1k minutes)",
+      "description": "Estimated marginal licensing or API usage cost per 1,000 minutes of processed audio for any detectors that incur such costs."
+    },
+    {
+      "name": "Calibrated_Brier_score",
+      "unit": "dimensionless (0\u20131)",
+      "description": "Brier score measuring the calibration quality of predicted synthetic probabilities; lower is better."
+    },
+    {
+      "name": "Adversarial_success_rate",
+      "unit": "fraction (0\u20131)",
+      "description": "Fraction of adversarial synthetic segments (from D_adv_tools) misclassified as human at a specified operating point."
+    },
+    {
+      "name": "Domain_perf_ratio_lang",
+      "unit": "dimensionless ratio",
+      "description": "Ratio of AUC_ROC (or 1 \u2013 EER) on new-language dataset to the same metric on base-domain dataset; used to quantify domain adaptation effectiveness."
+    },
+    {
+      "name": "Domain_perf_ratio_channel",
+      "unit": "dimensionless ratio",
+      "description": "Ratio of AUC_ROC (or 1 \u2013 EER) on new-channel dataset to the same metric on base-domain dataset."
+    }
+  ],
+  "success_criteria": [
+    "Ensemble performance: At least one ensemble configuration (e.g., ensemble_weighted_soft or ensemble_stacking_meta_lr) must demonstrate a statistically significant improvement in FNR_at_1pct_FPR and FNR_at_5pct_FPR over the single baseline_cnn_mfcc on D_base_test, with confidence intervals that do not overlap at the chosen significance level.",
+    "Domain adaptation retention: After applying domain adaptation strategies, Domain_perf_ratio_lang and Domain_perf_ratio_channel for adapted detectors or ensembles should be at or above a predefined threshold (e.g., \u22650.7 of base-domain performance) while maintaining acceptable FPR on in-domain validation data.",
+    "Adversarial robustness: Under WL4_adversarial_tools_eval, at least one ensemble configuration should achieve a lower Adversarial_success_rate than any single constituent detector at equivalent FPR, indicating that ensembles mitigate some tool-specific weaknesses.",
+    "Cost\u2013performance trade-offs: The cost-aware analysis under WL5_cost_latency_benchmark should identify at least one Pareto-efficient 'low-cost' and one 'high-security' configuration where no other evaluated configuration simultaneously achieves lower FNR_at_1pct_FPR and lower cost (Licensing_cost_per_1k_minutes + normalized compute costs) at compliant latency.",
+    "Reproducibility: Independent reruns of the experiment using the same code, configuration, and environment should produce metrics within a small tolerance band (e.g., \u00b11% relative for AUC/EER and within defined bounds for latency/throughput) across all workloads."
+  ],
+  "failure_modes": [
+    "Data leakage: Accidental inclusion of the same speakers, sessions, or cloned voice identities in both training and evaluation splits, leading to overestimated performance and non-generalizable conclusions.",
+    "Inconsistent preprocessing: Divergent audio preprocessing pipelines across detectors (e.g., different resampling or normalization) that confound comparison of detection quality and latency results.",
+    "Overfitting ensembles: Meta-learners or weighted ensembles tuned directly on test sets or too-small validation sets, yielding optimistic performance estimates that do not hold for new data.",
+    "Unrepresentative adversarial set: Adversarial evaluation relying on a narrow set of cloning tools or unrealistic synthesis parameters that do not reflect actual attacker capabilities in the enterprise context.",
+    "Misaligned cost estimates: Using inconsistent pricing models, ignoring fixed overheads, or failing to normalize costs by processed audio duration, leading to misleading cost\u2013performance trade-offs.",
+    "Latency benchmarking artifacts: Measuring latency using synthetic loads or different hardware profiles across configurations without proper documentation, making comparisons unreliable.",
+    "Regulatory or privacy breach: Using regulated or identifiable customer audio without appropriate approvals, anonymization, or minimization, introducing compliance risk and limiting reproducibility.",
+    "Stakeholder misinterpretation: Presenting technical metrics (AUC, EER) without translating their implications into operational risk terms (e.g., expected number of undetected synthetic calls per day), causing poor decision-making on model selection."
+  ],
+  "required_environment": {
+    "hardware": {
+      "cpu": "64-bit x86_64 processor with at least 8 physical cores (16 vCPUs recommended) and 32 GB RAM.",
+      "gpu": "Optional but recommended: at least one modern GPU with CUDA support and 8\u201316 GB VRAM for efficient training and evaluation of neural detectors.",
+      "storage": "Sufficient SSD storage to hold all audio datasets, feature caches, and model artifacts (e.g., 500 GB+ depending on dataset scale)."
+    },
+    "software": {
+      "os": "Linux distribution (e.g., Ubuntu LTS) or equivalent environment supporting Docker; document exact version.",
+      "languages_and_frameworks": [
+        "Python (e.g., 3.10 or later) as the primary language for the harness.",
+        "Deep learning framework (e.g., PyTorch or TensorFlow) for neural detectors.",
+        "Audio processing libraries (e.g., librosa, torchaudio, ffmpeg) for standardized pre-processing.",
+        "Data handling and analysis tools (e.g., pandas, NumPy, scikit-learn, or equivalents)."
+      ],
+      "containerization": "Docker or compatible container runtime to package detectors and the evaluation harness for reproducible runs.",
+      "orchestration_optional": "Optional use of a simple orchestration layer (e.g., docker-compose) to manage multiple detector services for ensemble evaluation.",
+      "monitoring_tools_optional": "Lightweight tools for resource measurement such as Linux perf, nvidia-smi, or built-in Python profiling libraries."
+    },
+    "repository_layout": {
+      "root_repo": "https://github.com/bookauthority/securing-call (companion repository referenced by the book).",
+      "suggested_structure": [
+        "experiments/ch6/ - configuration files, scripts, and documentation for this chapter.",
+        "experiments/ch6/config/ - YAML/JSON configs defining detectors, ensembles, and workloads.",
+        "experiments/ch6/harness/ - shared evaluation harness code.",
+        "experiments/ch6/models/ - scripts to train or load detectors.",
+        "experiments/ch6/results/ - structured outputs (metrics, logs, plots) for runs.",
+        "data/manifests/ - dataset manifests with checksums and metadata; audio may be stored separately or accessed via secure storage."
+      ]
+    },
+    "access_and_permissions": [
+      "Ability to store and access audio datasets in compliance with organizational policies.",
+      "API keys or credentials for any third-party detection services or voice cloning tools, if they are part of the experiment.",
+      "Approvals from internal privacy/compliance stakeholders if real call audio is involved."
+    ]
+  },
+  "run_instructions": [
+    "1. Prepare datasets:\n   - Assemble or download the base-domain dataset D_base, new-language dataset D_new_lang, new-channel dataset D_new_channel, and adversarial dataset D_adv_tools according to the book's guidance and organizational constraints.\n   - For each dataset, create a manifest file listing audio file paths, labels (synthetic/human), language, channel type, and any relevant metadata (e.g., speaker ID, call ID). Store manifests under data/manifests/.\n   - Generate stable train/validation/test splits for each dataset, ensuring no leakage across splits; save split indices in structured files (e.g., JSON or CSV) under data/manifests/splits/.\n",
+    "2. Standardize audio preprocessing:\n   - Implement a common preprocessing module (e.g., experiments/ch6/harness/preprocess.py) that applies consistent resampling, channel normalization, and feature extraction parameters across detectors where possible.\n   - For each detector, document any required deviations (e.g., raw waveform vs. spectrogram input) and integrate them via configuration so the harness remains the single entry point.\n",
+    "3. Implement or integrate detectors:\n   - Baseline and supervised detectors: Implement training scripts for baseline_cnn_mfcc and sup_cnn_mfcc_v2 under experiments/ch6/models/, consuming D_base_train and D_base_val splits.\n   - Self-supervised detector: Integrate a pre-trained self-supervised speech backbone and implement training of the classification head on D_base_train.\n   - Heuristic detector: Implement feature extraction and rule-based scoring logic using the same preprocessing module; calibrate a mapping from heuristic scores to synthetic probabilities using D_base_val.\n   - External API detector (if applicable): Implement a thin client in the harness that sends audio segments (or derived features) to the external API and returns synthetic probabilities, handling rate limits and errors.\n   - Package each detector either as a callable Python module within the harness or as a containerized microservice with a standardized /predict interface.\n",
+    "4. Train detectors and store artifacts:\n   - Run training scripts for all trainable detectors using only the designated training splits; log hyperparameters, training curves, and validation metrics.\n   - Save trained model weights, normalization parameters, and calibration objects under experiments/ch6/models/artifacts/ with versioned filenames.\n   - For each trained model, run a smoke test on a small subset of D_base_val to verify that inference works and outputs reasonable scores.\n",
+    "5. Configure ensembles and risk-based fusion:\n   - Create configuration files (e.g., YAML) under experiments/ch6/config/ defining components and rules for each ensemble: ensemble_majority_vote, ensemble_weighted_soft, ensemble_stacking_meta_lr, and ensemble_risk_tiered_fusion.\n   - For stacking: implement cross-validation routines that generate out-of-fold predictions on D_base_train for each base detector; train the meta-learner using these predictions plus optional context features (e.g., channel type), then save the meta-model artifact.\n   - For weighted soft voting: optimize weights on D_base_val to minimize a chosen objective (e.g., FNR_at_1pct_FPR) using a simple constrained optimization method (grid search or gradient-free search).\n",
+    "6. Run baseline evaluation (WL1):\n   - Use the shared harness (e.g., experiments/ch6/harness/run_eval.py) to evaluate baseline_cnn_mfcc, other individual detectors, and all ensembles on D_base_test.\n   - For each model/configuration, compute the full set of detection-quality metrics (AUC_ROC, AUC_PR, EER, FNR_at_1pct_FPR, FNR_at_5pct_FPR, Brier score) and store results in structured JSON or CSV under experiments/ch6/results/WL1/.\n   - Optionally, generate plots (ROC, PR) and calibration curves for documentation, stored under experiments/ch6/results/WL1/plots/.\n",
+    "7. Apply and evaluate domain adaptation (WL2 and WL3):\n   - For language adaptation: select a small labeled subset of D_new_lang_train according to the defined budget. Apply the lang_specific_finetune strategy to train adapted versions of baseline_cnn_mfcc and selfsup_embedding_classifier; keep original models unchanged for comparison.\n   - For channel adaptation: apply channel_calibration_only to adjust thresholds or calibration parameters based on D_new_channel_val without altering model weights.\n   - Evaluate both original and adapted detectors, as well as ensembles built from them, on D_new_lang_test and D_new_channel_test using the harness, saving metrics under experiments/ch6/results/WL2/ and WL3/ respectively.\n   - Compute Domain_perf_ratio_lang and Domain_perf_ratio_channel and store them alongside core metrics.\n",
+    "8. Conduct adversarial evaluation (WL4):\n   - Generate or acquire synthetic audio from multiple voice cloning tools with varying parameters as described; ensure manifests record the tool and settings used for each segment.\n   - Evaluate all detectors and ensembles on D_adv_tools using the shared harness.\n   - Compute Adversarial_success_rate at chosen operating points (e.g., thresholds that yield 1% and 5% FPR on D_base_val) and store results under experiments/ch6/results/WL4/.\n   - Analyze tool-specific and transformation-specific breakdowns (e.g., by cloning tool, codec, noise level) if dataset size permits.\n",
+    "9. Benchmark latency and cost (WL5):\n   - For selected configurations (e.g., baseline_cnn_mfcc, ensemble_majority_vote, ensemble_weighted_soft, ensemble_stacking_meta_lr, config_low_cost, config_high_security), run dedicated latency and throughput benchmarks using the harness in benchmark mode.\n   - Use a realistic mix of audio segments reflecting deployment conditions; run at one or more concurrency levels (e.g., 1, 10, 50 parallel requests) and record Latency_p50, Latency_p95, Throughput_rps, CPU_ms_per_min_audio, and GPU_ms_per_min_audio.\n   - Combine compute usage with estimated infrastructure pricing and any vendor licensing fees to compute Licensing_cost_per_1k_minutes where applicable; store all results under experiments/ch6/results/WL5/.\n",
+    "10. Analyze trade-offs and document for stakeholders:\n   - Using the collected metrics across workloads, plot or tabulate cost\u2013performance curves (e.g., FNR_at_1pct_FPR vs. total cost) to identify Pareto-efficient configurations.\n   - Summarize, in a human-readable report (e.g., Markdown or PDF under experiments/ch6/results/summary/), which configurations are best suited for low-, medium-, and high-risk call flows, explicitly stating detection performance, latency, and cost implications.\n   - Translate key technical metrics into operational impact estimates relevant to the book\u2019s enterprise audience (e.g., expected number of undetected synthetic calls per 100k calls at current channel mix).\n",
+    "11. Verify reproducibility:\n   - Re-run a subset of evaluations (e.g., WL1 and WL4) from a fresh environment (or by a separate team member) using the same code and configs.\n   - Compare resulting metrics to original runs; if discrepancies exceed defined tolerances, investigate and document causes (e.g., non-deterministic GPU operations, environment drift) and update the harness or documentation accordingly.\n",
+    "12. Archive and tag experiment state:\n   - Commit all configuration files, code changes, and manifests to the repository under a dedicated branch or tag corresponding to this experiment (e.g., ch6-v1).\n   - Store model artifacts and result files in a structured, discoverable manner, with README files capturing environment details, dataset versions, and any known caveats.\n   - Optionally, publish anonymized metric summaries and harness code as part of the public repository to support readers reproducing the experiments."
+  ],
+  "evidence_schema": {
+    "type": "object",
+    "description": "Schema for recording raw and aggregated results from each experimental run so that they can be analyzed, compared, and communicated to both technical and non-technical stakeholders.",
+    "required": [
+      "run_id",
+      "timestamp_utc",
+      "code_version",
+      "environment",
+      "dataset_id",
+      "workload_id",
+      "model_config",
+      "metrics"
+    ],
+    "properties": {
+      "run_id": {
+        "type": "string",
+        "description": "Unique identifier for a single execution of the harness for a given model configuration and workload (e.g., UUID)."
+      },
+      "timestamp_utc": {
+        "type": "string",
+        "format": "date-time",
+        "description": "Start time of the run in UTC."
+      },
+      "code_version": {
+        "type": "object",
+        "description": "Information about the code and configuration versions used in the run.",
+        "properties": {
+          "git_commit": {
+            "type": "string",
+            "description": "Git commit hash of the repository at run time."
+          },
+          "git_branch": {
+            "type": "string",
+            "description": "Name of the Git branch."
+          },
+          "config_files": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "List of configuration file paths used for this run."
+          }
+        },
+        "required": [
+          "git_commit"
+        ]
+      },
+      "environment": {
+        "type": "object",
+        "description": "Description of the hardware and software environment used during the run.",
+        "properties": {
+          "hardware": {
+            "type": "object",
+            "properties": {
+              "cpu_model": {
+                "type": "string"
+              },
+              "cpu_cores": {
+                "type": "integer"
+              },
+              "ram_gb": {
+                "type": "number"
+              },
+              "gpu_model": {
+                "type": "string"
+              },
+              "gpu_count": {
+                "type": "integer"
+              }
+            }
+          },
+          "software": {
+            "type": "object",
+            "properties": {
+              "os": {
+                "type": "string"
+              },
+              "python_version": {
+                "type": "string"
+              },
+              "dl_framework": {
+                "type": "string",
+                "description": "Name and version of deep learning framework."
+              },
+              "other_libraries": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Optional list of key library versions."
+              }
+            }
+          }
+        }
+      },
+      "dataset_id": {
+        "type": "string",
+        "description": "Identifier of the dataset split used in the run (e.g., D_base_test, D_new_lang_test, D_adv_tools)."
+      },
+      "workload_id": {
+        "type": "string",
+        "description": "Identifier of the workload scenario (e.g., WL1_base_domain_eval)."
+      },
+      "model_config": {
+        "type": "object",
+        "description": "Details about the detector or ensemble being evaluated.",
+        "properties": {
+          "detector_id": {
+            "type": "string",
+            "description": "ID of the primary detector or ensemble (e.g., baseline_cnn_mfcc, ensemble_stacking_meta_lr)."
+          },
+          "component_detectors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "List of component detector IDs for ensembles; empty or omitted for single detectors."
+          },
+          "hyperparameters": {
+            "type": "object",
+            "description": "Key hyperparameters for the model (e.g., learning rate, batch size, architecture choices)."
+          },
+          "fusion_strategy": {
+            "type": "string",
+            "description": "Description of fusion strategy (e.g., hard_voting, soft_voting, stacking, risk_based) for ensembles; optional otherwise."
+          },
+          "domain_adaptation": {
+            "type": "object",
+            "description": "Description of any domain adaptation or calibration applied before this run.",
+            "properties": {
+              "strategy_id": {
+                "type": "string"
+              },
+              "data_used_hours": {
+                "type": "number"
+              },
+              "notes": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "required": [
+          "detector_id"
+        ]
+      },
+      "metrics": {
+        "type": "object",
+        "description": "Quantitative results from the run.",
+        "properties": {
+          "AUC_ROC": {
+            "type": "number"
+          },
+          "AUC_PR": {
+            "type": "number"
+          },
+          "EER": {
+            "type": "number"
+          },
+          "FNR_at_1pct_FPR": {
+            "type": "number"
+          },
+          "FNR_at_5pct_FPR": {
+            "type": "number"
+          },
+          "Latency_p50": {
+            "type": "number"
+          },
+          "Latency_p95": {
+            "type": "number"
+          },
+          "Throughput_rps": {
+            "type": "number"
+          },
+          "CPU_ms_per_min_audio": {
+            "type": "number"
+          },
+          "GPU_ms_per_min_audio": {
+            "type": "number"
+          },
+          "Licensing_cost_per_1k_minutes": {
+            "type": "number"
+          },
+          "Calibrated_Brier_score": {
+            "type": "number"
+          },
+          "Adversarial_success_rate": {
+            "type": "number"
+          },
+          "Domain_perf_ratio_lang": {
+            "type": "number"
+          },
+          "Domain_perf_ratio_channel": {
+            "type": "number"
+          }
+        }
+      },
+      "metric_confidence_intervals": {
+        "type": "object",
+        "description": "Optional confidence intervals or variability estimates for key metrics.",
+        "properties": {
+          "AUC_ROC": {
+            "type": "object",
+            "properties": {
+              "lower": {
+                "type": "number"
+              },
+              "upper": {
+                "type": "number"
+              },
+              "confidence_level": {
+                "type": "number"
+              }
+            }
+          },
+          "EER": {
+            "type": "object",
+            "properties": {
+              "lower": {
+                "type": "number"
+              },
+              "upper": {
+                "type": "number"
+              },
+              "confidence_level": {
+                "type": "number"
+              }
+            }
+          }
+        }
+      },
+      "aggregation_level": {
+        "type": "string",
+        "enum": [
+          "segment",
+          "call",
+          "both"
+        ],
+        "description": "Indicates whether metrics are computed at segment level, call level, or both."
+      },
+      "notes": {
+        "type": "string",
+        "description": "Free-form field for run-specific annotations (e.g., anomalies observed, partial failures, deviations from standard protocol)."
+      }
+    }
+  }
+}
